@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Upload Results - Smart Document Hub</title>
+    <style>
+        body {
+            font-family: "Segoe UI", sans-serif;
+            background-color: #f9f9fb;
+            margin: 0;
+            padding: 20px;
+            color: #333;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        table {
+            width: 95%;
+            margin: 20px auto;
+            border-collapse: collapse;
+            background: white;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        th, td {
+            padding: 12px 16px;
+            border-bottom: 1px solid #ddd;
+            text-align: left;
+            font-size: 14px;
+        }
+        th {
+            background-color: #4a90e2;
+            color: white;
+        }
+        tr:hover {
+            background-color: #f2f2f2;
+        }
+        a.button {
+            text-decoration: none;
+            background-color: #4a90e2;
+            color: white;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 13px;
+        }
+        a.button:hover {
+            background-color: #357ab7;
+        }
+        .container {
+            text-align: center;
+        }
+        .footer {
+            text-align: center;
+            font-size: 13px;
+            color: #777;
+            margin-top: 30px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>📄 Upload Summary</h1>
+
+    {% if results %}
+    <table>
+        <thead>
+            <tr>
+                <th>Filename</th>
+                <th>Category</th>
+                <th>Summary</th>
+                <th>Routed To</th>
+                <th>Download</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in results %}
+            <tr>
+                <td>{{ r.filename }}</td>
+                <td>{{ r.category or 'N/A' }}</td>
+                <td style="max-width:400px; white-space:pre-wrap;">{{ r.summary }}</td>
+                <td>{{ r.route or 'No route' }}</td>
+                <td>
+                    <a class="button" 
+                       href="/uploads/{{ (r.saved_path | replace('\\', '/') ) | replace('uploads/', '') }}"
+                       target="_blank">View / Download</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+        <div class="container"><p>No results available.</p></div>
+    {% endif %}
+
+    <div class="footer">
+        <p>✅ All files processed successfully — Smart Document Hub</p>
+        <a class="button" href="/">← Back to Dashboard</a>
+    </div>
+
+</body>
+</html>

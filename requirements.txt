@@ -1,0 +1,9 @@
+Flask
+openai
+nltk
+python-dotenv
+python-dotenv
+email-validator
+scikit-learn
+joblib
+pandas

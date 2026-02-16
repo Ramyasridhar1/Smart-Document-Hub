@@ -1,0 +1,7 @@
+label,text
+invoice,"Invoice No: INV-1234 Total: 54,000 GST: 18% Bill to: Acme Ltd."
+invoice,"Bill to: XYZ Pvt Ltd. Invoice No 9876. Total amount due: 12000"
+payslip,"Payslip for John Doe Gross pay: 50000 Net pay: 42000 Pay period: Sep 2025"
+purchase_order,"Purchase Order PO No: PO-3456 Quantity 100 Unit price 200"
+minutes,"Minutes of meeting: attendees: Alice, Bob. Agenda: quarterly review"
+other,"Company brochure and product catalog"

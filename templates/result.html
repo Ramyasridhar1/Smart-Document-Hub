@@ -1,0 +1,41 @@
+<!-- templates/result_batch.html -->
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Upload Results</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto; padding:24px; max-width:900px; margin:auto; background:#f7fafc; }
+    .card { background:#fff; padding:18px; border-radius:10px; box-shadow:0 8px 22px rgba(0,0,0,0.06); }
+    table { width:100%; border-collapse: collapse; margin-top:10px; }
+    th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #eef2f7; }
+    th { background:#f8fafc; font-weight:700; }
+    a { color:#2563eb; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Upload Results</h2>
+    <p>Summary for the uploaded batch:</p>
+
+    <table>
+      <thead>
+        <tr><th>Filename</th><th>Category</th><th>Summary (truncated)</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for r in results %}
+        <tr>
+          <td>{{ r.filename }}</td>
+          <td>{{ r.category }}</td>
+          <td style="max-width:520px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ r.summary }}</td>
+          <td><a href="{{ url_for('download_file', filename=r.saved_path.split('/')[-1] if r.saved_path else r.filename) }}">Download</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <p style="margin-top:12px;"><a href="/">Back to Upload</a> • <a href="/history">View History</a></p>
+  </div>
+</body>
+</html>
