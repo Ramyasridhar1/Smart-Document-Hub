@@ -26,20 +26,18 @@ from functools import wraps
 from flask import session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 import openai
+import spacy
 
 
 # -----------------------------------------------------
 
 # === NLTK local data bootstrap ===
-venv_nltk_dir = os.path.join(os.getcwd(), '.venv', 'nltk_data')
-os.makedirs(venv_nltk_dir, exist_ok=True)
-if venv_nltk_dir not in nltk.data.path:
-    nltk.data.path.insert(0, venv_nltk_dir)
 try:
-    nltk.data.find('tokenizers/punkt')
-except LookupError:
-    print("punkt not found in nltk data path — downloading into", venv_nltk_dir)
-    nltk.download('punkt', download_dir=venv_nltk_dir, quiet=False)
+    nlp = spacy.load("en_core_web_sm")
+    print("spaCy NLP model loaded successfully")
+except OSError:
+    print("WARNING: spaCy model not found")
+    nlp = None
 # =====================================================
 
 # ---------------- ML model loader -------------------
@@ -60,7 +58,7 @@ except Exception as e:
 # LOAD ENVIRONMENT AND CONFIG
 # ---------------------------------
 load_dotenv()
-nltk.download('punkt', quiet=True)
+
 
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
 DB_PATH = os.getenv('DB_PATH', 'history.db')
@@ -165,10 +163,12 @@ def allowed_file(filename):
 
 
 def simple_summarize(text, max_sentences=4):
-    if not text:
+    if not text or not nlp:
         return ""
-    sents = sent_tokenize(text)
-    return ' '.join(sents[:max_sentences]) if len(sents) > max_sentences else ' '.join(sents)
+    
+    doc = nlp(text)
+    sentences = [sent.text.strip() for sent in doc.sents]
+    return ' '.join(sentences[:max_sentences])
 
 
 def extract_text(file_path, ocr_dpi=300, max_pages_for_ocr=50):
