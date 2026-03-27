@@ -1,0 +1,22 @@
+name: smart-document-hub
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: smart-document-hub
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DB_PATH: /var/lib/smartdoc/history.db
+      UPLOAD_FOLDER: /var/lib/smartdoc/uploads
+      FLASK_ENV: production
+    ports:
+      - "5000:5000"
+    volumes:
+      - sqlite_data:/var/lib/smartdoc
+
+volumes:
+  sqlite_data:

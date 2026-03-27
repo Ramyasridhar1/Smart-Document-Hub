@@ -3,3 +3,9 @@ __pycache__/
 uploads/
 *.bak
 .env
+.venv
+.env.local
+.env.*.local
+
+# Docker artifacts
+docker-compose.override.yml

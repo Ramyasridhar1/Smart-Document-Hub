@@ -2,8 +2,13 @@ Flask
 openai
 nltk
 python-dotenv
-python-dotenv
 email-validator
 scikit-learn
 joblib
 pandas
+spacy
+pdfplumber
+python-docx
+pdf2image
+pytesseract
+Pillow
