@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 import mimetypes
 import smtplib
 from email.message import EmailMessage
+from settings_store import DEFAULT_SETTING_KEYS, get_settings_bulk
 
 # Optional OCR / extraction libs — used if installed
 try:
@@ -42,6 +43,13 @@ except Exception:
 
 # load .env
 load_dotenv()
+
+
+def _safe_int(value, default):
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
 
 # Config (expects keys in .env)
 IMAP_HOST = os.getenv('IMAP_HOST')
@@ -68,6 +76,67 @@ ADMIN_EMAIL = os.getenv('ADMIN_EMAIL')
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'doc'}
 
 POLL_SECONDS = int(os.getenv('IMAP_POLL_SECONDS', '20'))  # how often to poll
+
+
+def reload_runtime_config():
+    global IMAP_HOST, IMAP_PORT, IMAP_USER, IMAP_PASS
+    global EMAIL_USER, EMAIL_PASS, SMTP_SERVER, SMTP_PORT
+    global ROUTE_invoice, ROUTE_payslip, ROUTE_purchase_order, ROUTE_minutes
+    global FROM_NAME, ADMIN_EMAIL, UPLOAD_FOLDER, DB_PATH, POLL_SECONDS
+
+    env_cfg = {
+        'imap_host': os.getenv('IMAP_HOST'),
+        'imap_port': os.getenv('IMAP_PORT', '993'),
+        'imap_user': os.getenv('IMAP_USER'),
+        'imap_pass': os.getenv('IMAP_PASS'),
+        'email_user': os.getenv('EMAIL_USER'),
+        'email_pass': os.getenv('EMAIL_PASS'),
+        'smtp_server': os.getenv('SMTP_SERVER', 'smtp.gmail.com'),
+        'smtp_port': os.getenv('SMTP_PORT', '587'),
+        'route_invoice': os.getenv('ROUTE_invoice'),
+        'route_payslip': os.getenv('ROUTE_payslip'),
+        'route_purchase_order': os.getenv('ROUTE_purchase_order'),
+        'route_minutes': os.getenv('ROUTE_minutes'),
+        'from_name': os.getenv('FROM_NAME', 'Smart Document Hub'),
+        'admin_email': os.getenv('ADMIN_EMAIL'),
+        'upload_folder': os.getenv('UPLOAD_FOLDER', 'uploads'),
+        'db_path': os.getenv('DB_PATH', 'history.db'),
+        'imap_poll_seconds': os.getenv('IMAP_POLL_SECONDS', '20'),
+    }
+
+    db_path = env_cfg['db_path']
+    try:
+        db_values = get_settings_bulk(db_path)
+        for key in DEFAULT_SETTING_KEYS:
+            if key in db_values and db_values.get(key) is not None:
+                env_cfg[key] = db_values.get(key)
+    except Exception:
+        pass
+
+    IMAP_HOST = env_cfg.get('imap_host')
+    IMAP_PORT = _safe_int(env_cfg.get('imap_port'), 993)
+    IMAP_USER = env_cfg.get('imap_user')
+    IMAP_PASS = env_cfg.get('imap_pass')
+
+    EMAIL_USER = env_cfg.get('email_user')
+    EMAIL_PASS = env_cfg.get('email_pass')
+    SMTP_SERVER = env_cfg.get('smtp_server')
+    SMTP_PORT = _safe_int(env_cfg.get('smtp_port'), 587)
+
+    ROUTE_invoice = env_cfg.get('route_invoice')
+    ROUTE_payslip = env_cfg.get('route_payslip')
+    ROUTE_purchase_order = env_cfg.get('route_purchase_order')
+    ROUTE_minutes = env_cfg.get('route_minutes')
+
+    FROM_NAME = env_cfg.get('from_name') or 'Smart Document Hub'
+    ADMIN_EMAIL = env_cfg.get('admin_email')
+
+    UPLOAD_FOLDER = env_cfg.get('upload_folder') or 'uploads'
+    DB_PATH = env_cfg.get('db_path') or 'history.db'
+    POLL_SECONDS = _safe_int(env_cfg.get('imap_poll_seconds'), 20)
+
+
+reload_runtime_config()
 
 # helpers (extraction, classify, log, send) - similar to app.py
 def allowed_file(filename):
@@ -422,12 +491,15 @@ def process_message(msg, mail):
 
 
 def poll_imap_loop():
-    if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
-        print("IMAP credentials not configured. Set IMAP_HOST/IMAP_USER/IMAP_PASS in .env")
-        return
+    reload_runtime_config()
     print("Starting IMAP poll loop. Poll interval:", POLL_SECONDS, "seconds")
     while True:
         try:
+            reload_runtime_config()
+            if not IMAP_HOST or not IMAP_USER or not IMAP_PASS:
+                print("IMAP credentials missing at runtime. Waiting for updated settings.")
+                time.sleep(POLL_SECONDS)
+                continue
             mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
             mail.login(IMAP_USER, IMAP_PASS)
             mail.select('INBOX')

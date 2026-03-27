@@ -27,6 +27,14 @@ from flask import session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 import openai
 import spacy
+from settings_store import (
+    DEFAULT_SETTING_KEYS,
+    SENSITIVE_SETTING_KEYS,
+    ensure_settings_schema,
+    get_settings_bulk,
+    get_settings_updated_at,
+    set_setting,
+)
 
 
 # -----------------------------------------------------
@@ -89,24 +97,31 @@ app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
 
-SECRET_KEY = os.getenv('FLASK_SECRET_KEY', None) or os.urandom(24).hex()
+SECRET_KEY = os.getenv('FLASK_SECRET_KEY', None) or os.getenv('SECRET_KEY', None) or os.urandom(24).hex()
 app.secret_key = SECRET_KEY
 # expose a few helpful vars to all templates so templates can use them directly
 @app.context_processor
 def inject_template_globals():
+    runtime = get_runtime_settings()
     try:
         cfg = app.config
     except Exception:
         cfg = {}
+    cfg['EMAIL_USER'] = runtime.get('email_user')
+    cfg['ROUTE_invoice'] = runtime.get('route_invoice')
+    cfg['ROUTE_payslip'] = runtime.get('route_payslip')
+    cfg['ROUTE_purchase_order'] = runtime.get('route_purchase_order')
+    cfg['ROUTE_minutes'] = runtime.get('route_minutes')
+    cfg['ADMIN_USER'] = ADMIN_USER
     return {
         'app': app,
         'config': cfg,
-        'EMAIL_USER': EMAIL_USER,
-        'ROUTE_invoice': ROUTE_invoice,
-        'ROUTE_payslip': ROUTE_payslip,
-        'ROUTE_purchase_order': ROUTE_purchase_order,
-        'ROUTE_minutes': ROUTE_minutes,
-        'FROM_NAME': FROM_NAME
+        'EMAIL_USER': runtime.get('email_user'),
+        'ROUTE_invoice': runtime.get('route_invoice'),
+        'ROUTE_payslip': runtime.get('route_payslip'),
+        'ROUTE_purchase_order': runtime.get('route_purchase_order'),
+        'ROUTE_minutes': runtime.get('route_minutes'),
+        'FROM_NAME': runtime.get('from_name'),
     }
 
 if ADMIN_PASS:
@@ -121,6 +136,81 @@ def login_required(f):
             return redirect(url_for('login', next=request.path))
         return f(*args, **kwargs)
     return decorated_function
+
+
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login', next=request.path))
+        if session.get('username') != ADMIN_USER:
+            return abort(403)
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+def _is_valid_email(value):
+    if not value:
+        return False
+    if ' ' in value:
+        return False
+    return '@' in value and '.' in value.split('@')[-1]
+
+
+def _safe_int(value, default):
+    try:
+        return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def get_runtime_settings():
+    settings = {
+        'email_user': EMAIL_USER,
+        'email_pass': EMAIL_PASS,
+        'smtp_server': SMTP_SERVER,
+        'smtp_port': str(SMTP_PORT),
+        'imap_host': os.getenv('IMAP_HOST'),
+        'imap_port': os.getenv('IMAP_PORT', '993'),
+        'imap_user': os.getenv('IMAP_USER'),
+        'imap_pass': os.getenv('IMAP_PASS'),
+        'route_invoice': ROUTE_invoice,
+        'route_payslip': ROUTE_payslip,
+        'route_purchase_order': ROUTE_purchase_order,
+        'route_minutes': ROUTE_minutes,
+        'from_name': FROM_NAME,
+        'admin_email': ADMIN_EMAIL,
+        'imap_poll_seconds': os.getenv('IMAP_POLL_SECONDS', '20'),
+    }
+
+    try:
+        db_values = get_settings_bulk(DB_PATH)
+        for key in DEFAULT_SETTING_KEYS:
+            if key in db_values and db_values.get(key) is not None:
+                settings[key] = db_values.get(key)
+    except Exception:
+        pass
+
+    settings['smtp_port'] = _safe_int(settings.get('smtp_port'), 587)
+    settings['imap_port'] = _safe_int(settings.get('imap_port'), 993)
+    settings['imap_poll_seconds'] = _safe_int(settings.get('imap_poll_seconds'), 20)
+    return settings
+
+
+def audit_log(action, details=''):
+    actor = session.get('username') if session else None
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        c = conn.cursor()
+        c.execute(
+            'INSERT INTO audit_log (actor, action, details, created_at) VALUES (?, ?, ?, ?)',
+            (actor or 'system', action, details, datetime.utcnow().isoformat()),
+        )
+        conn.commit()
+    except Exception as e:
+        print('Audit log failed:', e)
+    finally:
+        conn.close()
 
 # ---------------------------------
 # DATABASE INIT
@@ -143,6 +233,19 @@ def init_db():
                     message TEXT,
                     created_at TEXT
                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    is_encrypted INTEGER DEFAULT 0,
+                    updated_at TEXT
+                )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY,
+                    actor TEXT,
+                    action TEXT,
+                    details TEXT,
+                    created_at TEXT
+                )''')
     conn.commit()
 
     cols = [r[1] for r in c.execute("PRAGMA table_info(uploads)").fetchall()]
@@ -154,6 +257,7 @@ def init_db():
             print("DB migration error:", e)
     conn.commit()
     conn.close()
+    ensure_settings_schema(DB_PATH)
 
 # ---------------------------------
 # HELPERS
@@ -263,13 +367,20 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     Send one email with an optional single attachment.
     Returns True on success, False on failure.
     """
-    if not EMAIL_USER or not EMAIL_PASS:
+    runtime = get_runtime_settings()
+    smtp_user = runtime.get('email_user')
+    smtp_pass = runtime.get('email_pass')
+    from_name = runtime.get('from_name') or FROM_NAME
+    smtp_server = runtime.get('smtp_server') or SMTP_SERVER
+    smtp_port = _safe_int(runtime.get('smtp_port'), 587)
+
+    if not smtp_user or not smtp_pass:
         print("SMTP credentials missing.")
         return False
     try:
         msg = EmailMessage()
         msg['Subject'] = subject
-        msg['From'] = f"{FROM_NAME} <{EMAIL_USER}>"
+        msg['From'] = f"{from_name} <{smtp_user}>"
         msg['To'] = to_email
         msg.set_content(body_text)
 
@@ -280,41 +391,9 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
             with open(attachment_path, 'rb') as f:
                 msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=fname)
 
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+        with smtplib.SMTP(smtp_server, smtp_port) as smtp:
             smtp.starttls()
-            smtp.login(EMAIL_USER, EMAIL_PASS)
-            smtp.send_message(msg)
-        return True
-    except Exception as e:
-        print("Email send error:", e)
-        return False
-
-
-def send_email_with_attachment(to_email, subject, body_text, attachment_path=None, attachment_name=None):
-    """
-    Send one email with an optional single attachment.
-    Returns True on success, False on failure.
-    """
-    if not EMAIL_USER or not EMAIL_PASS:
-        print("SMTP credentials missing.")
-        return False
-    try:
-        msg = EmailMessage()
-        msg['Subject'] = subject
-        msg['From'] = f"{FROM_NAME} <{EMAIL_USER}>"
-        msg['To'] = to_email
-        msg.set_content(body_text)
-
-        if attachment_path and os.path.exists(attachment_path):
-            fname = attachment_name or os.path.basename(attachment_path)
-            ctype, _ = mimetypes.guess_type(attachment_path)
-            maintype, subtype = (ctype or 'application/octet-stream').split('/', 1)
-            with open(attachment_path, 'rb') as f:
-                msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=fname)
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
-            smtp.starttls()
-            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.login(smtp_user, smtp_pass)
             smtp.send_message(msg)
         print(f"📨 Sent single email with subject: {subject} to {to_email}")
         return True
@@ -330,13 +409,20 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
     - attachment_names: optional list of filenames to use for attachments (same length as attachment_paths)
     Returns True on success, False on failure.
     """
-    if not EMAIL_USER or not EMAIL_PASS:
+    runtime = get_runtime_settings()
+    smtp_user = runtime.get('email_user')
+    smtp_pass = runtime.get('email_pass')
+    from_name = runtime.get('from_name') or FROM_NAME
+    smtp_server = runtime.get('smtp_server') or SMTP_SERVER
+    smtp_port = _safe_int(runtime.get('smtp_port'), 587)
+
+    if not smtp_user or not smtp_pass:
         print("SMTP credentials missing.")
         return False
     try:
         msg = EmailMessage()
         msg['Subject'] = subject
-        msg['From'] = f"{FROM_NAME} <{EMAIL_USER}>"
+        msg['From'] = f"{from_name} <{smtp_user}>"
         msg['To'] = to_email
         msg.set_content(body_text)
 
@@ -358,9 +444,9 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
                 except Exception as e:
                     print(f"Failed to attach {ap}: {e}")
 
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as smtp:
+        with smtplib.SMTP(smtp_server, smtp_port) as smtp:
             smtp.starttls()
-            smtp.login(EMAIL_USER, EMAIL_PASS)
+            smtp.login(smtp_user, smtp_pass)
             smtp.send_message(msg)
         print(f"✅ Email with {len(attachment_paths or [])} attachments sent to {to_email}")
         return True
@@ -369,11 +455,12 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
         return False
 
 def route_for_category(category):
+    runtime = get_runtime_settings()
     mapping = {
-        'invoice': ROUTE_invoice,
-        'payslip': ROUTE_payslip,
-        'purchase_order': ROUTE_purchase_order,
-        'minutes': ROUTE_minutes
+        'invoice': runtime.get('route_invoice'),
+        'payslip': runtime.get('route_payslip'),
+        'purchase_order': runtime.get('route_purchase_order'),
+        'minutes': runtime.get('route_minutes')
     }
     dest = mapping.get(category)
     return dest if dest and dest.strip() else None
@@ -540,8 +627,10 @@ def upload_file():
     for r in results:
         uploader = r.get('uploader_email')
         if uploader:
+            runtime = get_runtime_settings()
+            from_name = runtime.get('from_name') or FROM_NAME
             reply_subject = f"Receipt: {r.get('filename')} (classified: {r.get('category')})"
-            reply_body = f"Hi,\n\nWe processed your file '{r.get('filename')}'.\nCategory: {r.get('category')}\nSummary:\n{r.get('summary')}\n\nThanks,\n{FROM_NAME}"
+            reply_body = f"Hi,\n\nWe processed your file '{r.get('filename')}'.\nCategory: {r.get('category')}\nSummary:\n{r.get('summary')}\n\nThanks,\n{from_name}"
             try:
                 send_email_with_attachment(uploader, reply_subject, reply_body, None, None)
             except Exception as e:
@@ -720,6 +809,8 @@ def chat_send():
                 if path:
                     # if admin email configured, attach and send
                     admin = ADMIN_EMAIL or os.getenv('ADMIN_EMAIL')
+                    runtime = get_runtime_settings()
+                    admin = runtime.get('admin_email') or admin
                     if admin:
                         send_email_with_attachment(admin, f"Export: {category or 'all'}", "Attached CSV export.", path, os.path.basename(path))
                     reply_text = f"CSV export created and saved to {path}."
@@ -816,14 +907,13 @@ def chat_send():
         # ⚙️ Settings
         'routes': (
             f"Here are the configured routing emails:\n"
-            f"• Invoices → {ROUTE_invoice}\n"
-            f"• Payslips → {ROUTE_payslip}\n"
-            f"• Purchase Orders → {ROUTE_purchase_order}\n"
-            f"• Minutes → {ROUTE_minutes}"
+            f"• Invoices → {route_for_category('invoice') or 'not set'}\n"
+            f"• Payslips → {route_for_category('payslip') or 'not set'}\n"
+            f"• Purchase Orders → {route_for_category('purchase_order') or 'not set'}\n"
+            f"• Minutes → {route_for_category('minutes') or 'not set'}"
         ),
         'change route': (
-            "To change a route, open your .env file and modify the corresponding ROUTE_ line. "
-            "Then restart the server."
+            "To change routes and mailbox credentials, open Admin Settings from the dashboard."
         ),
 
         # 🧑 Personal
@@ -884,7 +974,7 @@ def chat_send():
         else:
             recipient = route_for_category(category)
             if not recipient:
-                reply_text = f"No route configured for {category}. Set ROUTE_{category} in .env."
+                reply_text = f"No route configured for {category}. Update it in Admin Settings."
             else:
                 # ask for confirmation as a multi-step action
                 session['pending_action'] = {'type':'forward_confirm','category':category,'recipient':recipient}
@@ -1069,6 +1159,108 @@ def logout():
     flash("Logged out.", "info")
     return redirect(url_for('login'))
 
+
+@app.route('/admin/settings', methods=['GET', 'POST'])
+@admin_required
+def admin_settings():
+    runtime = get_runtime_settings()
+    display = {
+        'EMAIL_USER': runtime.get('email_user') or '',
+        'SMTP_SERVER': runtime.get('smtp_server') or '',
+        'SMTP_PORT': str(runtime.get('smtp_port') or 587),
+        'IMAP_HOST': runtime.get('imap_host') or '',
+        'IMAP_PORT': str(runtime.get('imap_port') or 993),
+        'IMAP_USER': runtime.get('imap_user') or '',
+        'ROUTE_invoice': runtime.get('route_invoice') or '',
+        'ROUTE_payslip': runtime.get('route_payslip') or '',
+        'ROUTE_purchase_order': runtime.get('route_purchase_order') or '',
+        'ROUTE_minutes': runtime.get('route_minutes') or '',
+        'FROM_NAME': runtime.get('from_name') or 'Smart Document Hub',
+        'ADMIN_EMAIL': runtime.get('admin_email') or '',
+    }
+    has_email_pass = bool(runtime.get('email_pass'))
+    has_imap_pass = bool(runtime.get('imap_pass'))
+
+    if request.method == 'POST':
+        form = request.form
+
+        smtp_port = _safe_int(form.get('SMTP_PORT', '').strip(), -1)
+        imap_port = _safe_int(form.get('IMAP_PORT', '').strip(), -1)
+
+        if not (1 <= smtp_port <= 65535):
+            flash('SMTP port must be between 1 and 65535.', 'error')
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+        if not (1 <= imap_port <= 65535):
+            flash('IMAP port must be between 1 and 65535.', 'error')
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+
+        email_user = (form.get('EMAIL_USER') or '').strip()
+        imap_user = (form.get('IMAP_USER') or '').strip()
+        route_invoice = (form.get('ROUTE_invoice') or '').strip()
+        route_payslip = (form.get('ROUTE_payslip') or '').strip()
+        route_po = (form.get('ROUTE_purchase_order') or '').strip()
+        route_minutes = (form.get('ROUTE_minutes') or '').strip()
+        admin_email = (form.get('ADMIN_EMAIL') or '').strip()
+
+        email_fields = [
+            ('EMAIL_USER', email_user),
+            ('IMAP_USER', imap_user),
+            ('ROUTE_invoice', route_invoice),
+            ('ROUTE_payslip', route_payslip),
+            ('ROUTE_purchase_order', route_po),
+            ('ROUTE_minutes', route_minutes),
+        ]
+        if admin_email:
+            email_fields.append(('ADMIN_EMAIL', admin_email))
+
+        for field_name, value in email_fields:
+            if value and not _is_valid_email(value):
+                flash(f'Invalid email format for {field_name}.', 'error')
+                return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+
+        updates = {
+            'email_user': email_user,
+            'smtp_server': (form.get('SMTP_SERVER') or '').strip(),
+            'smtp_port': str(smtp_port),
+            'imap_host': (form.get('IMAP_HOST') or '').strip(),
+            'imap_port': str(imap_port),
+            'imap_user': imap_user,
+            'route_invoice': route_invoice,
+            'route_payslip': route_payslip,
+            'route_purchase_order': route_po,
+            'route_minutes': route_minutes,
+            'from_name': (form.get('FROM_NAME') or '').strip() or 'Smart Document Hub',
+            'admin_email': admin_email,
+        }
+
+        email_pass = (form.get('EMAIL_PASS') or '').strip()
+        if email_pass:
+            updates['email_pass'] = email_pass
+        imap_pass = (form.get('IMAP_PASS') or '').strip()
+        if imap_pass:
+            updates['imap_pass'] = imap_pass
+
+        try:
+            for key, value in updates.items():
+                set_setting(DB_PATH, key, value, encrypt=key in SENSITIVE_SETTING_KEYS)
+        except Exception as e:
+            flash(f'Failed to save settings: {e}', 'error')
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+
+        audit_log('settings_updated', 'Updated SMTP/IMAP credentials and routing settings.')
+
+        # Apply changes immediately for IMAP worker without restart.
+        try:
+            from imap_fetcher import reload_runtime_config
+            reload_runtime_config()
+        except Exception as e:
+            print('IMAP runtime reload failed:', e)
+
+        flash('Settings updated successfully.', 'success')
+        return redirect(url_for('admin_settings'))
+
+    return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+
 # ---------------- IMAP monitoring helpers (non-invasive) ----------------
 # We set a global thread reference when starting IMAP to allow status checks.
 imap_thread = None
@@ -1077,15 +1269,17 @@ imap_thread = None
 @app.route('/imap_status')
 @login_required
 def imap_status():
+    runtime = get_runtime_settings()
     info = {
         'imap_thread_alive': bool(imap_thread and imap_thread.is_alive()),
         'imap_thread_name': imap_thread.name if imap_thread else None,
-        'smtp_user': EMAIL_USER,
+        'smtp_user': runtime.get('email_user'),
+        'settings_updated_at': get_settings_updated_at(DB_PATH),
         'routes': {
-            'invoice': ROUTE_invoice,
-            'payslip': ROUTE_payslip,
-            'purchase_order': ROUTE_purchase_order,
-            'minutes': ROUTE_minutes
+            'invoice': runtime.get('route_invoice'),
+            'payslip': runtime.get('route_payslip'),
+            'purchase_order': runtime.get('route_purchase_order'),
+            'minutes': runtime.get('route_minutes')
         }
     }
     return jsonify(info)
@@ -1093,11 +1287,13 @@ def imap_status():
 @app.route('/status')
 @login_required
 def status():
+    runtime = get_runtime_settings()
     return jsonify({
         'app': 'Smart Document Hub',
         'ml_model_loaded': bool(_ml_pipeline),
-        'smtp_user': EMAIL_USER is not None,
-        'imap_thread_alive': bool(imap_thread and imap_thread.is_alive())
+        'smtp_user': bool(runtime.get('email_user')),
+        'imap_thread_alive': bool(imap_thread and imap_thread.is_alive()),
+        'settings_updated_at': get_settings_updated_at(DB_PATH),
     })
 
 # ---------------------------------

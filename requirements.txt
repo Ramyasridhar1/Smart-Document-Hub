@@ -12,3 +12,4 @@ python-docx
 pdf2image
 pytesseract
 Pillow
+cryptography

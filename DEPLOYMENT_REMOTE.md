@@ -83,3 +83,17 @@ docker compose up -d
 ```
 
 Avoid `docker compose down -v` unless you intentionally want to delete SQLite and uploads data.
+
+## 8) Mail account updates from dashboard
+
+- Log in as admin and open `/admin/settings`.
+- Update SMTP/IMAP credentials and routing emails from the form.
+- Save to apply changes immediately (no container restart needed).
+
+For encrypted password storage consistency, set one stable secret in `.env`:
+
+```env
+SETTINGS_ENCRYPTION_KEY=replace-with-a-long-random-value
+```
+
+If this is not set, the app falls back to `FLASK_SECRET_KEY` or `SECRET_KEY`.

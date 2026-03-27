@@ -30,6 +30,9 @@
         <div class="d-flex gap-2 flex-wrap">
           <a class="btn btn-sm btn-outline-primary" href="{{ url_for('history_page') }}">Open History</a>
           <a class="btn btn-sm btn-outline-primary" href="{{ url_for('chat_page') }}">Open Chat</a>
+          {% if session.get('username') == config.get('ADMIN_USER', 'admin') %}
+            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_settings') }}">Open Settings</a>
+          {% endif %}
           <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('logout') }}">Logout</a>
         </div>
 

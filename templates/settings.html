@@ -1,0 +1,106 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="row">
+  <div class="col-lg-10 mx-auto">
+    <div class="card shadow-sm mb-4">
+      <div class="card-body">
+        <h4 class="card-title mb-3">Admin Settings</h4>
+        <p class="text-muted">Update mailbox credentials and routing addresses without editing code or .env. Password fields are encrypted in SQLite.</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+          {% if messages %}
+            {% for cat, msg in messages %}
+              <div class="alert {% if cat == 'error' %}alert-danger{% elif cat == 'success' %}alert-success{% else %}alert-info{% endif %}" role="alert">
+                {{ msg }}
+              </div>
+            {% endfor %}
+          {% endif %}
+        {% endwith %}
+
+        <form method="post" action="{{ url_for('admin_settings') }}">
+          <h5 class="mt-2">SMTP Sender</h5>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">SMTP Email User</label>
+              <input class="form-control" type="email" name="EMAIL_USER" value="{{ values.EMAIL_USER }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">SMTP Password</label>
+              <input class="form-control" type="password" name="EMAIL_PASS" placeholder="{% if has_email_pass %}Saved. Leave blank to keep unchanged{% else %}Enter new password{% endif %}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">SMTP Server</label>
+              <input class="form-control" type="text" name="SMTP_SERVER" value="{{ values.SMTP_SERVER }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">SMTP Port</label>
+              <input class="form-control" type="number" name="SMTP_PORT" value="{{ values.SMTP_PORT }}" min="1" max="65535" required>
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h5>IMAP Receiver</h5>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">IMAP Host</label>
+              <input class="form-control" type="text" name="IMAP_HOST" value="{{ values.IMAP_HOST }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">IMAP Port</label>
+              <input class="form-control" type="number" name="IMAP_PORT" value="{{ values.IMAP_PORT }}" min="1" max="65535" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">IMAP User</label>
+              <input class="form-control" type="email" name="IMAP_USER" value="{{ values.IMAP_USER }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">IMAP Password</label>
+              <input class="form-control" type="password" name="IMAP_PASS" placeholder="{% if has_imap_pass %}Saved. Leave blank to keep unchanged{% else %}Enter new password{% endif %}">
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h5>Routing</h5>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">Invoice Route</label>
+              <input class="form-control" type="email" name="ROUTE_invoice" value="{{ values.ROUTE_invoice }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Payslip Route</label>
+              <input class="form-control" type="email" name="ROUTE_payslip" value="{{ values.ROUTE_payslip }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Purchase Order Route</label>
+              <input class="form-control" type="email" name="ROUTE_purchase_order" value="{{ values.ROUTE_purchase_order }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Minutes Route</label>
+              <input class="form-control" type="email" name="ROUTE_minutes" value="{{ values.ROUTE_minutes }}" required>
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h5>Branding & Admin Notifications</h5>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">From Name</label>
+              <input class="form-control" type="text" name="FROM_NAME" value="{{ values.FROM_NAME }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Admin Email</label>
+              <input class="form-control" type="email" name="ADMIN_EMAIL" value="{{ values.ADMIN_EMAIL }}">
+            </div>
+          </div>
+
+          <div class="mt-4 d-flex gap-2">
+            <button class="btn btn-primary" type="submit">Save Settings</button>
+            <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Cancel</a>
+          </div>
+          <p class="small text-muted mt-3 mb-0">Changes apply immediately to mail sending and IMAP polling.</p>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
