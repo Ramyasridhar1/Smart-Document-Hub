@@ -46,6 +46,18 @@
               <label class="form-label">IMAP Password</label>
               <input class="form-control" type="password" name="IMAP_PASS" placeholder="{% if has_imap_pass %}Saved. Leave blank to keep unchanged{% else %}Enter new password{% endif %}">
             </div>
+            <div class="col-md-6 form-check mt-4 ms-3">
+              <input class="form-check-input" type="checkbox" id="imapSkipExistingUnseen" name="IMAP_SKIP_EXISTING_UNSEEN" {% if values.IMAP_SKIP_EXISTING_UNSEEN == '1' %}checked{% endif %}>
+              <label class="form-check-label" for="imapSkipExistingUnseen">Skip existing unread inbox emails on IMAP worker start</label>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Allowed Sender Emails (comma separated, optional)</label>
+              <input class="form-control" type="text" name="IMAP_ALLOWED_SENDERS" value="{{ values.IMAP_ALLOWED_SENDERS }}" placeholder="hr@example.com, recruiter@example.com">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Required Subject Keyword (optional)</label>
+              <input class="form-control" type="text" name="IMAP_SUBJECT_KEYWORD" value="{{ values.IMAP_SUBJECT_KEYWORD }}" placeholder="smartdoc">
+            </div>
           </div>
 
           <hr class="my-4">
