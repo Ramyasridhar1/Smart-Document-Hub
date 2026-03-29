@@ -29,6 +29,7 @@ from flask import session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 import openai
 import spacy
+import re
 from settings_store import (
     DEFAULT_SETTING_KEYS,
     SENSITIVE_SETTING_KEYS,
@@ -492,12 +493,30 @@ def get_route_output_dir(category, runtime):
 
 
 def simple_summarize(text, max_sentences=4):
-    if not text or not nlp:
-        return ""
-    
-    doc = nlp(text)
-    sentences = [sent.text.strip() for sent in doc.sents]
-    return ' '.join(sentences[:max_sentences])
+    if not text:
+        return "No text extracted."
+
+    cleaned = re.sub(r"\s+", " ", text).strip()
+    if not cleaned:
+        return "No text extracted."
+
+    # Prefer spaCy sentence boundaries when model is available.
+    if nlp:
+        try:
+            doc = nlp(cleaned)
+            sentences = [sent.text.strip() for sent in doc.sents if sent.text and sent.text.strip()]
+            if sentences:
+                return ' '.join(sentences[:max_sentences])
+        except Exception as e:
+            logger.warning("spaCy summarization fallback triggered: %s", e)
+
+    # Fallback for environments where spaCy model/sentencizer is unavailable.
+    parts = re.split(r"(?<=[.!?])\s+|\n+", cleaned)
+    parts = [p.strip() for p in parts if p and p.strip()]
+    if parts:
+        return ' '.join(parts[:max_sentences])
+
+    return cleaned[:500]
 
 
 def extract_text(file_path, ocr_dpi=300, max_pages_for_ocr=50):
@@ -822,7 +841,7 @@ def upload_file():
 
         # Extract, summarize, classify
         text = extract_text(saved_path)
-        summary = simple_summarize(text) if text else "No text extracted."
+        summary = simple_summarize(text)
         category = classify_document(text)
         resume_score = None
         resume_rank_note = None

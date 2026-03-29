@@ -97,3 +97,101 @@ SETTINGS_ENCRYPTION_KEY=replace-with-a-long-random-value
 ```
 
 If this is not set, the app falls back to `FLASK_SECRET_KEY` or `SECRET_KEY`.
+
+## 9) Add a new SMTP/IMAP mailbox (Gmail or Outlook)
+
+Use this when you want to change the sender mailbox (SMTP) and inbox listener mailbox (IMAP).
+
+### 9.1 Where to enter values in the app
+
+1. Log in as admin.
+2. Open /admin/settings.
+3. Fill these fields:
+   - SMTP Email User
+   - SMTP Password
+   - SMTP Server
+   - SMTP Port
+   - IMAP Host
+   - IMAP Port
+   - IMAP User
+   - IMAP Password
+4. Save settings.
+
+Notes:
+- Most providers require SSL/TLS settings implicitly by host+port.
+- Password fields should use an App Password where possible, not your normal login password.
+
+### 9.2 Gmail setup
+
+#### A) Prepare the account
+
+1. Turn on 2-Step Verification for the Google account.
+2. Create an App Password (Mail).
+3. Use that App Password in SMTP Password and IMAP Password.
+
+#### B) Use these server values
+
+- SMTP Server: smtp.gmail.com
+- SMTP Port: 587
+- IMAP Host: imap.gmail.com
+- IMAP Port: 993
+
+#### C) Username format
+
+- SMTP Email User: full Gmail address (example: yourname@gmail.com)
+- IMAP User: full Gmail address
+
+### 9.3 Outlook setup (Outlook.com / Microsoft 365)
+
+#### A) Prepare the account
+
+1. If available, enable multi-factor authentication.
+2. If your tenant/account supports App Passwords, create one and use it.
+3. If App Passwords are not available, use normal password only if your org policy allows basic auth for SMTP/IMAP.
+
+#### B) Use these server values
+
+- SMTP Server: smtp.office365.com
+- SMTP Port: 587
+- IMAP Host: outlook.office365.com
+- IMAP Port: 993
+
+#### C) Username format
+
+- SMTP Email User: full Outlook address (example: yourname@outlook.com or yourname@company.com)
+- IMAP User: full Outlook address
+
+### 9.4 Quick test checklist after saving
+
+1. Open /status and confirm SMTP user is shown.
+2. Open /imap_status and confirm IMAP thread is alive.
+3. Upload one small file and verify:
+   - classification completes,
+   - routing email is sent,
+   - file appears in history.
+
+### 9.5 Troubleshooting by symptom
+
+- Authentication failed:
+  - Wrong password, or normal password used instead of App Password.
+  - 2FA enabled but App Password not configured.
+
+- Connection timeout:
+  - Wrong host/port, firewall, or provider blocking sign-in.
+
+- Works for SMTP but IMAP fails:
+  - IMAP not enabled for the mailbox policy/account.
+  - IMAP username/password mismatch.
+
+### 9.6 Optional .env equivalents
+
+You can also set the same values in .env (or use dashboard settings):
+
+- EMAIL_USER
+- EMAIL_PASS
+- SMTP_SERVER
+- SMTP_PORT
+- IMAP_HOST
+- IMAP_PORT
+- IMAP_USER
+- IMAP_PASS
