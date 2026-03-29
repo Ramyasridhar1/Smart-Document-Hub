@@ -7,8 +7,8 @@ No local Docker and no local SQLite installation are required.
 
 ```bash
 # On the server
-mkdir -p /opt/smart-document-hub
-cd /opt/smart-document-hub
+mkdir -p /home/work/major/smart-document-hub
+cd /home/work/major/smart-document-hub
 git clone <YOUR_REPO_URL> .
 # Ensure .env exists with your real values
 nano .env
@@ -23,7 +23,7 @@ git commit -m "your change"
 git push origin <branch>
 
 # On the server
-cd /opt/smart-document-hub
+cd /home/work/major/smart-document-hub
 git pull origin <branch>
 docker compose build
 docker compose up -d
@@ -54,10 +54,10 @@ Data survives container rebuilds/restarts as long as the volume is not removed.
 
 ```bash
 # On the server, create a backup on host filesystem
-mkdir -p /opt/smart-document-hub/backups
+mkdir -p /home/work/major/smart-document-hub/backups
 docker run --rm \
   -v smart-document-hub_sqlite_data:/data \
-  -v /opt/smart-document-hub/backups:/backup \
+  -v /home/work/major/smart-document-hub/backups:/backup \
   alpine sh -c 'cp /data/history.db /backup/history_$(date +%Y%m%d_%H%M%S).db'
 ```
 
@@ -68,7 +68,7 @@ Use `docker volume ls | grep sqlite_data` to confirm.
 
 ```bash
 # On server, rollback to previous commit
-cd /opt/smart-document-hub
+cd /home/work/major/smart-document-hub
 git log --oneline -n 5
 git checkout <previous_commit_sha>
 docker compose build

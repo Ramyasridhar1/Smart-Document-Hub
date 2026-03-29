@@ -1,7 +1,8 @@
 # reorganize_uploads.py
-import os, sqlite3, shutil
+import os, shutil
+import db_compat as sqlite3
 
-DB_PATH = "history.db"
+DB_PATH = os.getenv('DATABASE_URL', 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc')
 UPLOADS = "uploads"
 
 conn = sqlite3.connect(DB_PATH)

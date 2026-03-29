@@ -1,78 +1,50 @@
 {% extends "layout.html" %}
 {% block content %}
-<div class="row">
-  <div class="col-md-8">
-    <div class="card shadow-sm mb-4">
-      <div class="card-body">
-        <h4 class="card-title">Upload documents</h4>
-        <p class="text-muted">Drag & drop or choose files. Supported: .pdf, .docx, .doc, .txt</p>
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="app-card p-4">
+      <h3 class="mb-2">Document Upload</h3>
+      <p class="text-muted-app mb-4">Upload one or more files. The app classifies each document, stores it, and optionally routes it to local folders and email targets.</p>
 
-        <form method="post" action="{{ url_for('upload_file') }}" enctype="multipart/form-data" class="mb-3">
-          <div class="mb-3">
-            <label for="file" class="form-label">Choose files</label>
-            <input class="form-control" type="file" id="file" name="file" multiple>
-          </div>
-
-          <div class="mb-3">
-            <label for="email" class="form-label">Your email (optional — for auto-reply)</label>
-            <input type="email" class="form-control" id="email" name="email" placeholder="you@example.com">
-          </div>
-
-          <div class="d-flex gap-2">
-            <button type="submit" class="btn btn-primary">Upload & Process</button>
-            <a href="{{ url_for('history_page') }}" class="btn btn-outline-secondary">View History</a>
-          </div>
-        </form>
-
-        <hr>
-
-        <h5 class="mb-2">Quick actions</h5>
-        <div class="d-flex gap-2 flex-wrap">
-          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('history_page') }}">Open History</a>
-          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('chat_page') }}">Open Chat</a>
-          {% if session.get('username') == config.get('ADMIN_USER', 'admin') %}
-            <a class="btn btn-sm btn-outline-primary" href="{{ url_for('admin_settings') }}">Open Settings</a>
-          {% endif %}
-          <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('logout') }}">Logout</a>
+      <form method="post" action="{{ url_for('upload_file') }}" enctype="multipart/form-data">
+        <div class="mb-3">
+          <label for="file" class="form-label fw-semibold">Choose files</label>
+          <input class="form-control" type="file" id="file" name="file" multiple required>
+          <div class="form-text">Supported formats: PDF, DOCX, DOC, TXT</div>
         </div>
 
-      </div>
-    </div>
+        <div class="mb-4">
+          <label for="email" class="form-label fw-semibold">Uploader email (optional)</label>
+          <input type="email" class="form-control" id="email" name="email" placeholder="you@example.com">
+          <div class="form-text">If provided, a processing confirmation email can be sent.</div>
+        </div>
 
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h5 class="card-title">Notes</h5>
-        <ul>
-          <li>Files are auto-classified and moved into category folders inside <code>{{ app.config['UPLOAD_FOLDER'] }}</code>.</li>
-          <li>Batch forwarding: files grouped by route and one email is sent per recipient (CSV + attachments).</li>
-          <li>Gmail SMTP limits apply (≈ 25MB per message). Large batches may fail to send.</li>
-        </ul>
-      </div>
+        <div class="d-flex flex-wrap gap-2">
+          <button type="submit" class="btn btn-primary px-4">Upload & Process</button>
+          <a href="{{ url_for('history_page') }}" class="btn btn-outline-secondary">View History</a>
+          <a href="{{ url_for('chat_page') }}" class="btn btn-outline-secondary">Open Chat</a>
+        </div>
+      </form>
     </div>
   </div>
 
-  <div class="col-md-4">
-    <div class="card shadow-sm mb-4">
-      <div class="card-body">
-        <h5 class="card-title">IMAP & Email status</h5>
-        <p class="mb-1"><strong>SMTP user:</strong> {{ (config.get('EMAIL_USER') or EMAIL_USER) }}</p>
-        <p class="mb-1"><strong>Route (invoice):</strong> {{ ROUTE_invoice or 'not set' }}</p>
-        <p class="mb-1"><strong>Route (payslip):</strong> {{ ROUTE_payslip or 'not set' }}</p>
-        <p class="mb-3"><strong>Check IMAP thread:</strong> <a href="{{ url_for('imap_status') }}">/imap_status</a></p>
-
-        <h6>Quick test</h6>
-        <p class="small text-muted">Use this to confirm SMTP works — you previously ran <code>test_send.py</code>.</p>
-      </div>
+  <div class="col-lg-4">
+    <div class="app-card p-4 mb-4">
+      <h5 class="mb-3">Storage Snapshot</h5>
+      <p class="mb-2"><strong>Upload root:</strong><br><span class="text-muted-app">{{ app.config['UPLOAD_FOLDER'] }}</span></p>
+      <p class="mb-2"><strong>Database:</strong><br><span class="text-muted-app">PostgreSQL</span></p>
+      <p class="mb-0"><strong>SMTP account:</strong><br><span class="text-muted-app">{{ (config.get('EMAIL_USER') or EMAIL_USER or 'not set') }}</span></p>
     </div>
 
-    <div class="card shadow-sm">
-      <div class="card-body">
-        <h5 class="card-title">Tips</h5>
-        <ol class="small">
-          <li>Use the History page to export CSV reports.</li>
-          <li>Click file links on History to download processed files.</li>
-          <li>If forwarding doesn't appear in Inbox, check logs in your terminal for errors.</li>
-        </ol>
+    <div class="app-card p-4">
+      <h5 class="mb-3">Quick Access</h5>
+      <div class="d-grid gap-2">
+        <a class="btn btn-outline-primary" href="{{ url_for('history_page') }}">History</a>
+        <a class="btn btn-outline-primary" href="{{ url_for('chat_page') }}">Chat Assistant</a>
+        {% if is_admin %}
+          <a class="btn btn-outline-primary" href="{{ url_for('admin_dashboard') }}">Admin Dashboard</a>
+          <a class="btn btn-outline-primary" href="{{ url_for('admin_settings') }}">System Settings</a>
+        {% endif %}
       </div>
     </div>
   </div>

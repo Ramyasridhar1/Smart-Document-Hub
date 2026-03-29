@@ -2,20 +2,9 @@
 {% block content %}
 <div class="row">
   <div class="col-lg-10 mx-auto">
-    <div class="card shadow-sm mb-4">
-      <div class="card-body">
+    <div class="app-card p-4 mb-4">
         <h4 class="card-title mb-3">Admin Settings</h4>
-        <p class="text-muted">Update mailbox credentials and routing addresses without editing code or .env. Password fields are encrypted in SQLite.</p>
-
-        {% with messages = get_flashed_messages(with_categories=true) %}
-          {% if messages %}
-            {% for cat, msg in messages %}
-              <div class="alert {% if cat == 'error' %}alert-danger{% elif cat == 'success' %}alert-success{% else %}alert-info{% endif %}" role="alert">
-                {{ msg }}
-              </div>
-            {% endfor %}
-          {% endif %}
-        {% endwith %}
+        <p class="text-muted-app">Manage mail credentials, storage locations, routed output folders, logging, and PostgreSQL connection settings from one place. Password fields are encrypted at rest.</p>
 
         <form method="post" action="{{ url_for('admin_settings') }}">
           <h5 class="mt-2">SMTP Sender</h5>
@@ -78,6 +67,86 @@
               <label class="form-label">Minutes Route</label>
               <input class="form-control" type="email" name="ROUTE_minutes" value="{{ values.ROUTE_minutes }}" required>
             </div>
+            <div class="col-md-6">
+              <label class="form-label">Resume Route</label>
+              <input class="form-control" type="email" name="ROUTE_resume" value="{{ values.ROUTE_resume }}" required>
+            </div>
+            <div class="col-md-6 form-check mt-4 ms-3">
+              <input class="form-check-input" type="checkbox" id="routeLocalEnabled" name="ROUTE_LOCAL_ENABLED" {% if values.ROUTE_LOCAL_ENABLED == '1' %}checked{% endif %}>
+              <label class="form-check-label" for="routeLocalEnabled">Enable local routed-folder output</label>
+            </div>
+            <div class="col-md-6 form-check mt-4 ms-3">
+              <input class="form-check-input" type="checkbox" id="routeEmailEnabled" name="ROUTE_EMAIL_ENABLED" {% if values.ROUTE_EMAIL_ENABLED == '1' %}checked{% endif %}>
+              <label class="form-check-label" for="routeEmailEnabled">Enable email forwarding</label>
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h5>Storage Paths</h5>
+          <div class="row g-3">
+            <div class="col-md-12">
+              <label class="form-label">Upload Root Directory</label>
+              <input class="form-control" type="text" name="UPLOAD_FOLDER" value="{{ values.UPLOAD_FOLDER }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Route Folder - Invoice</label>
+              <input class="form-control" type="text" name="ROUTE_DIR_invoice" value="{{ values.ROUTE_DIR_invoice }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Route Folder - Payslip</label>
+              <input class="form-control" type="text" name="ROUTE_DIR_payslip" value="{{ values.ROUTE_DIR_payslip }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Route Folder - Purchase Order</label>
+              <input class="form-control" type="text" name="ROUTE_DIR_purchase_order" value="{{ values.ROUTE_DIR_purchase_order }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Route Folder - Minutes</label>
+              <input class="form-control" type="text" name="ROUTE_DIR_minutes" value="{{ values.ROUTE_DIR_minutes }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Route Folder - Resume</label>
+              <input class="form-control" type="text" name="ROUTE_DIR_resume" value="{{ values.ROUTE_DIR_resume }}" required>
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h5>Resume Ranking</h5>
+          <div class="row g-3">
+            <div class="col-md-12">
+              <label class="form-label">Required Skills (comma separated)</label>
+              <input class="form-control" type="text" name="RESUME_REQUIRED_SKILLS" value="{{ values.RESUME_REQUIRED_SKILLS }}" placeholder="python, django">
+            </div>
+            <div class="col-md-12">
+              <label class="form-label">Preferred Skills (comma separated)</label>
+              <input class="form-control" type="text" name="RESUME_PREFERRED_SKILLS" value="{{ values.RESUME_PREFERRED_SKILLS }}" placeholder="flask, postgresql, docker">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Certificate Bonus</label>
+              <input class="form-control" type="number" name="RESUME_CERTIFICATE_BONUS" value="{{ values.RESUME_CERTIFICATE_BONUS }}" min="0" max="100" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Project Bonus</label>
+              <input class="form-control" type="number" name="RESUME_PROJECT_BONUS" value="{{ values.RESUME_PROJECT_BONUS }}" min="0" max="100" required>
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h5>Logging</h5>
+          <div class="row g-3">
+            <div class="col-md-8">
+              <label class="form-label">Log File Path</label>
+              <input class="form-control" type="text" name="LOG_FILE_PATH" value="{{ values.LOG_FILE_PATH }}" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Log Level</label>
+              <select class="form-select" name="LOG_LEVEL">
+                <option value="DEBUG" {% if values.LOG_LEVEL == 'DEBUG' %}selected{% endif %}>DEBUG</option>
+                <option value="INFO" {% if values.LOG_LEVEL == 'INFO' %}selected{% endif %}>INFO</option>
+                <option value="WARNING" {% if values.LOG_LEVEL == 'WARNING' %}selected{% endif %}>WARNING</option>
+                <option value="ERROR" {% if values.LOG_LEVEL == 'ERROR' %}selected{% endif %}>ERROR</option>
+              </select>
+            </div>
           </div>
 
           <hr class="my-4">
@@ -95,11 +164,10 @@
 
           <div class="mt-4 d-flex gap-2">
             <button class="btn btn-primary" type="submit">Save Settings</button>
-            <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Cancel</a>
+            <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Cancel</a>
           </div>
-          <p class="small text-muted mt-3 mb-0">Changes apply immediately to mail sending and IMAP polling.</p>
+          <p class="small text-muted mt-3 mb-0">Changes apply immediately for upload, routing, resume ranking and logging.</p>
         </form>
-      </div>
     </div>
   </div>
 </div>

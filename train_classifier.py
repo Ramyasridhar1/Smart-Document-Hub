@@ -61,7 +61,7 @@ def train():
 
     pipeline = Pipeline([
         ("tfidf", TfidfVectorizer(ngram_range=(1,2), max_features=20000, min_df=1)),
-        ("clf", LogisticRegression(max_iter=1000, class_weight='balanced', solver='liblinear'))
+        ("clf", LogisticRegression(max_iter=1000, class_weight='balanced', solver='lbfgs'))
     ])
 
     print("Training model on", len(X_train), "samples...")
@@ -72,7 +72,7 @@ def train():
     if X_val:
         preds = pipeline.predict(X_val)
         print("Validation results:")
-        print(classification_report(y_val, preds))
+        print(classification_report(y_val, preds, zero_division=0))
     else:
         print("No validation set created (very small dataset).")
 

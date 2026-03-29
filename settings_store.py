@@ -1,7 +1,7 @@
 import base64
 import hashlib
 import os
-import sqlite3
+import db_compat as sqlite3
 from datetime import datetime
 from typing import Dict, Optional
 
@@ -25,9 +25,24 @@ DEFAULT_SETTING_KEYS = {
     'route_payslip',
     'route_purchase_order',
     'route_minutes',
+    'route_resume',
     'from_name',
     'admin_email',
     'imap_poll_seconds',
+    'upload_folder',
+    'route_dir_invoice',
+    'route_dir_payslip',
+    'route_dir_purchase_order',
+    'route_dir_minutes',
+    'route_dir_resume',
+    'route_local_enabled',
+    'route_email_enabled',
+    'log_file_path',
+    'log_level',
+    'resume_required_skills',
+    'resume_preferred_skills',
+    'resume_certificate_bonus',
+    'resume_project_bonus',
 }
 
 

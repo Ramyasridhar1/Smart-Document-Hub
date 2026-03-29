@@ -1,22 +1,39 @@
 name: smart-document-hub
 
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: smart-document-hub-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: smartdoc
+      POSTGRES_USER: smartdoc
+      POSTGRES_PASSWORD: smartdoc
+    command: ["postgres", "-c", "shared_buffers=128MB", "-c", "max_connections=60"]
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
   app:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: smart-document-hub
     restart: unless-stopped
+    depends_on:
+      - db
     env_file:
       - .env
     environment:
-      DB_PATH: /var/lib/smartdoc/history.db
+      DATABASE_URL: postgresql://smartdoc:smartdoc@db:5432/smartdoc
       UPLOAD_FOLDER: /var/lib/smartdoc/uploads
       FLASK_ENV: production
     ports:
       - "5000:5000"
     volumes:
-      - sqlite_data:/var/lib/smartdoc
+      - smartdoc_data:/var/lib/smartdoc
 
 volumes:
-  sqlite_data:
+  smartdoc_data:
+  postgres_data:

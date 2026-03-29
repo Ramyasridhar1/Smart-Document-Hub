@@ -11,7 +11,7 @@ IMAP fetcher for Smart Document Hub.
 
 import os
 import time
-import sqlite3
+import db_compat as sqlite3
 import imaplib
 import email
 from email.policy import default
@@ -63,12 +63,14 @@ SMTP_SERVER = os.getenv('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
 
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
-DB_PATH = os.getenv('DB_PATH', 'history.db')
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc')
+DB_PATH = DATABASE_URL
 
 ROUTE_invoice = os.getenv('ROUTE_invoice')
 ROUTE_payslip = os.getenv('ROUTE_payslip')
 ROUTE_purchase_order = os.getenv('ROUTE_purchase_order')
 ROUTE_minutes = os.getenv('ROUTE_minutes')
+ROUTE_resume = os.getenv('ROUTE_resume')
 
 FROM_NAME = os.getenv('FROM_NAME', 'Smart Document Hub')
 ADMIN_EMAIL = os.getenv('ADMIN_EMAIL')
@@ -81,7 +83,7 @@ POLL_SECONDS = int(os.getenv('IMAP_POLL_SECONDS', '20'))  # how often to poll
 def reload_runtime_config():
     global IMAP_HOST, IMAP_PORT, IMAP_USER, IMAP_PASS
     global EMAIL_USER, EMAIL_PASS, SMTP_SERVER, SMTP_PORT
-    global ROUTE_invoice, ROUTE_payslip, ROUTE_purchase_order, ROUTE_minutes
+    global ROUTE_invoice, ROUTE_payslip, ROUTE_purchase_order, ROUTE_minutes, ROUTE_resume
     global FROM_NAME, ADMIN_EMAIL, UPLOAD_FOLDER, DB_PATH, POLL_SECONDS
 
     env_cfg = {
@@ -97,10 +99,11 @@ def reload_runtime_config():
         'route_payslip': os.getenv('ROUTE_payslip'),
         'route_purchase_order': os.getenv('ROUTE_purchase_order'),
         'route_minutes': os.getenv('ROUTE_minutes'),
+        'route_resume': os.getenv('ROUTE_resume'),
         'from_name': os.getenv('FROM_NAME', 'Smart Document Hub'),
         'admin_email': os.getenv('ADMIN_EMAIL'),
         'upload_folder': os.getenv('UPLOAD_FOLDER', 'uploads'),
-        'db_path': os.getenv('DB_PATH', 'history.db'),
+        'db_path': os.getenv('DATABASE_URL', 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc'),
         'imap_poll_seconds': os.getenv('IMAP_POLL_SECONDS', '20'),
     }
 
@@ -127,12 +130,13 @@ def reload_runtime_config():
     ROUTE_payslip = env_cfg.get('route_payslip')
     ROUTE_purchase_order = env_cfg.get('route_purchase_order')
     ROUTE_minutes = env_cfg.get('route_minutes')
+    ROUTE_resume = env_cfg.get('route_resume')
 
     FROM_NAME = env_cfg.get('from_name') or 'Smart Document Hub'
     ADMIN_EMAIL = env_cfg.get('admin_email')
 
     UPLOAD_FOLDER = env_cfg.get('upload_folder') or 'uploads'
-    DB_PATH = env_cfg.get('db_path') or 'history.db'
+    DB_PATH = env_cfg.get('db_path') or 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc'
     POLL_SECONDS = _safe_int(env_cfg.get('imap_poll_seconds'), 20)
 
 
@@ -223,12 +227,14 @@ def classify_document(text):
     payslip_keywords = ['payslip', 'salary', 'net pay', 'pay period', 'gross pay']
     po_keywords = ['purchase order', 'po no']
     minutes_keywords = ['minutes of meeting', 'attendees', 'agenda', 'meeting']
+    resume_keywords = ['resume', 'curriculum vitae', 'experience', 'skills', 'education', 'certification', 'projects']
 
     scores = {
         'invoice': sum(t.count(k) for k in invoice_keywords),
         'payslip': sum(t.count(k) for k in payslip_keywords),
         'purchase_order': sum(t.count(k) for k in po_keywords),
-        'minutes': sum(t.count(k) for k in minutes_keywords)
+        'minutes': sum(t.count(k) for k in minutes_keywords),
+        'resume': sum(t.count(k) for k in resume_keywords),
     }
 
     best = max(scores, key=scores.get)
@@ -272,7 +278,8 @@ def route_for_category(category):
         'invoice': ROUTE_invoice,
         'payslip': ROUTE_payslip,
         'purchase_order': ROUTE_purchase_order,
-        'minutes': ROUTE_minutes
+        'minutes': ROUTE_minutes,
+        'resume': ROUTE_resume,
     }
     dest = mapping.get(category)
     return dest if dest and dest.strip() else None

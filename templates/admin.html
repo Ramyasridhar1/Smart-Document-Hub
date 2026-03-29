@@ -1,0 +1,48 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="app-card p-4">
+      <h3 class="mb-2">Admin Dashboard</h3>
+      <p class="text-muted-app mb-4">Manage users, storage, and system configuration. This area is restricted to administrators.</p>
+
+      <div class="row g-3">
+        <div class="col-md-4">
+          <div class="border rounded p-3 h-100">
+            <div class="small text-muted-app">Total users</div>
+            <div class="fs-3 fw-semibold">{{ total_users }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded p-3 h-100">
+            <div class="small text-muted-app">Admins</div>
+            <div class="fs-3 fw-semibold">{{ total_admins }}</div>
+          </div>
+        </div>
+        <div class="col-md-4">
+          <div class="border rounded p-3 h-100">
+            <div class="small text-muted-app">Active users</div>
+            <div class="fs-3 fw-semibold">{{ active_users }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="d-flex flex-wrap gap-2 mt-4">
+        <a href="{{ url_for('admin_users') }}" class="btn btn-primary">Manage Users</a>
+        <a href="{{ url_for('admin_settings') }}" class="btn btn-outline-primary">System Settings</a>
+        <a href="{{ url_for('status') }}" class="btn btn-outline-secondary" target="_blank">Runtime Status</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-4">
+    <div class="app-card p-4 mb-4">
+      <h5 class="mb-3">Storage Overview</h5>
+      <p class="mb-2"><strong>Upload folder</strong><br><span class="text-muted-app">{{ runtime.upload_folder }}</span></p>
+      <p class="mb-2"><strong>Invoice route dir</strong><br><span class="text-muted-app">{{ runtime.route_dir_invoice }}</span></p>
+      <p class="mb-2"><strong>Database backend</strong><br><span class="text-muted-app">PostgreSQL</span></p>
+      <p class="mb-0"><strong>Log file</strong><br><span class="text-muted-app">{{ runtime.log_file_path }}</span></p>
+    </div>
+  </div>
+</div>
+{% endblock %}

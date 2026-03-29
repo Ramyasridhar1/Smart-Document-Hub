@@ -19,7 +19,7 @@ COPY . /app
 
 # Default runtime paths; can be overridden via env
 ENV UPLOAD_FOLDER=/var/lib/smartdoc/uploads \
-    DB_PATH=/var/lib/smartdoc/history.db
+    DATABASE_URL=postgresql://smartdoc:smartdoc@db:5432/smartdoc
 
 RUN mkdir -p /var/lib/smartdoc/uploads
 

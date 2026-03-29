@@ -68,6 +68,9 @@
                 <th>Filename</th>
                 <th>Category</th>
                 <th>Summary</th>
+                <th>Resume Score</th>
+                <th>Risk Score</th>
+                <th>Risk Flags</th>
                 <th>Routed To</th>
                 <th>Download</th>
             </tr>
@@ -78,6 +81,9 @@
                 <td>{{ r.filename }}</td>
                 <td>{{ r.category or 'N/A' }}</td>
                 <td style="max-width:400px; white-space:pre-wrap;">{{ r.summary }}</td>
+                <td>{% if r.category == 'resume' %}{{ r.resume_score if r.resume_score is not none else '-' }}{% else %}-{% endif %}</td>
+                <td>{% if r.category == 'resume' %}{{ r.resume_risk_score if r.resume_risk_score is not none else '-' }}{% else %}-{% endif %}</td>
+                <td style="max-width:220px; white-space:pre-wrap;">{% if r.category == 'resume' %}{{ (r.resume_risk_flags or [])|join(', ') if r.resume_risk_flags is iterable and r.resume_risk_flags is not string else (r.resume_risk_flags or '-') }}{% else %}-{% endif %}</td>
                 <td>{{ r.route or 'No route' }}</td>
                 <td>
                     <a class="button" 

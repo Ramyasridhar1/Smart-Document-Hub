@@ -13,3 +13,4 @@ pdf2image
 pytesseract
 Pillow
 cryptography
+psycopg2-binary
