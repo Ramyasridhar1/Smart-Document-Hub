@@ -78,6 +78,9 @@ ADMIN_EMAIL = os.getenv('ADMIN_EMAIL')
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'doc'}
 
 POLL_SECONDS = int(os.getenv('IMAP_POLL_SECONDS', '20'))  # how often to poll
+IMAP_SKIP_EXISTING_UNSEEN = str(os.getenv('IMAP_SKIP_EXISTING_UNSEEN', '1')).strip().lower() in {'1', 'true', 'yes', 'on'}
+IMAP_ALLOWED_SENDERS = os.getenv('IMAP_ALLOWED_SENDERS', '')
+IMAP_SUBJECT_KEYWORD = os.getenv('IMAP_SUBJECT_KEYWORD', '')
 
 
 def reload_runtime_config():
@@ -85,6 +88,7 @@ def reload_runtime_config():
     global EMAIL_USER, EMAIL_PASS, SMTP_SERVER, SMTP_PORT
     global ROUTE_invoice, ROUTE_payslip, ROUTE_purchase_order, ROUTE_minutes, ROUTE_resume
     global FROM_NAME, ADMIN_EMAIL, UPLOAD_FOLDER, DB_PATH, POLL_SECONDS
+    global IMAP_SKIP_EXISTING_UNSEEN, IMAP_ALLOWED_SENDERS, IMAP_SUBJECT_KEYWORD
 
     env_cfg = {
         'imap_host': os.getenv('IMAP_HOST'),
@@ -105,6 +109,9 @@ def reload_runtime_config():
         'upload_folder': os.getenv('UPLOAD_FOLDER', 'uploads'),
         'db_path': os.getenv('DATABASE_URL', 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc'),
         'imap_poll_seconds': os.getenv('IMAP_POLL_SECONDS', '20'),
+        'imap_skip_existing_unseen': os.getenv('IMAP_SKIP_EXISTING_UNSEEN', '1'),
+        'imap_allowed_senders': os.getenv('IMAP_ALLOWED_SENDERS', ''),
+        'imap_subject_keyword': os.getenv('IMAP_SUBJECT_KEYWORD', ''),
     }
 
     db_path = env_cfg['db_path']
@@ -138,6 +145,9 @@ def reload_runtime_config():
     UPLOAD_FOLDER = env_cfg.get('upload_folder') or 'uploads'
     DB_PATH = env_cfg.get('db_path') or 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc'
     POLL_SECONDS = _safe_int(env_cfg.get('imap_poll_seconds'), 20)
+    IMAP_SKIP_EXISTING_UNSEEN = str(env_cfg.get('imap_skip_existing_unseen', '1')).strip().lower() in {'1', 'true', 'yes', 'on'}
+    IMAP_ALLOWED_SENDERS = env_cfg.get('imap_allowed_senders') or ''
+    IMAP_SUBJECT_KEYWORD = env_cfg.get('imap_subject_keyword') or ''
 
 
 reload_runtime_config()
@@ -494,12 +504,42 @@ def process_message(msg, mail):
     return total_attachments > 0
 
 
+def _extract_sender_email(sender_value):
+    if not sender_value:
+        return ''
+    if '<' in sender_value and '>' in sender_value:
+        start = sender_value.find('<') + 1
+        end = sender_value.find('>')
+        return sender_value[start:end].strip().lower()
+    return sender_value.strip().lower()
+
+
+def _parse_allowed_senders(value):
+    return {s.strip().lower() for s in (value or '').split(',') if s.strip()}
+
+
+def _message_passes_filters(msg):
+    sender = _extract_sender_email(msg.get('From'))
+    subject = decode_mime_words(msg.get('Subject') or '').lower()
+
+    allowed_senders = _parse_allowed_senders(IMAP_ALLOWED_SENDERS)
+    if allowed_senders and sender not in allowed_senders:
+        return False, f"sender-filtered:{sender or 'unknown'}"
+
+    keyword = (IMAP_SUBJECT_KEYWORD or '').strip().lower()
+    if keyword and keyword not in subject:
+        return False, f"subject-filtered:{keyword}"
+
+    return True, ''
+
+
     
 
 
 def poll_imap_loop():
     reload_runtime_config()
     print("Starting IMAP poll loop. Poll interval:", POLL_SECONDS, "seconds")
+    first_successful_poll = True
     while True:
         try:
             reload_runtime_config()
@@ -518,6 +558,21 @@ def poll_imap_loop():
                 time.sleep(POLL_SECONDS)
                 continue
             ids = data[0].split()
+
+            # On first successful connection, optionally skip old unseen backlog to avoid mass ingestion.
+            if first_successful_poll and IMAP_SKIP_EXISTING_UNSEEN and ids:
+                print("Skipping", len(ids), "existing UNSEEN messages on startup (IMAP_SKIP_EXISTING_UNSEEN=1).")
+                for num in ids:
+                    try:
+                        mail.store(num, '+FLAGS', '\\Seen')
+                    except Exception as e:
+                        print("Failed marking startup backlog message as seen", num, e)
+                first_successful_poll = False
+                mail.logout()
+                time.sleep(POLL_SECONDS)
+                continue
+
+            first_successful_poll = False
             if not ids:
                 # nothing new
                 mail.logout()
@@ -532,6 +587,11 @@ def poll_imap_loop():
                         continue
                     raw = msg_data[0][1]
                     parsed = email.message_from_bytes(raw, policy=default)
+                    passes, reason = _message_passes_filters(parsed)
+                    if not passes:
+                        print("Skipping message", num, "due to", reason)
+                        mail.store(num, '+FLAGS', '\\Seen')
+                        continue
                     processed = process_message(parsed, mail)
                     # mark as seen (even if no attachment) to avoid reprocessing
                     mail.store(num, '+FLAGS', '\\Seen')
