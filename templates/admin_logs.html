@@ -1,0 +1,81 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-12">
+    <div class="app-card p-4">
+      <div class="d-flex flex-wrap justify-content-between align-items-start gap-3 mb-3">
+        <div>
+          <h3 class="mb-1">Developer Logs</h3>
+          <p class="text-muted-app mb-0">Restricted to the developer account only. Inspect recent runtime logs and errors.</p>
+        </div>
+        <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary">Back to Admin</a>
+      </div>
+
+      <form method="get" class="row g-3 align-items-end mb-4">
+        <div class="col-md-3">
+          <label class="form-label">Tail Lines</label>
+          <input type="number" class="form-control" name="lines" min="50" max="2000" value="{{ lines }}">
+        </div>
+        <div class="col-md-3">
+          <label class="form-label">Level</label>
+          <select class="form-select" name="level">
+            <option value="ALL" {% if level == 'ALL' %}selected{% endif %}>ALL</option>
+            <option value="ERROR" {% if level == 'ERROR' %}selected{% endif %}>ERROR</option>
+            <option value="WARNING" {% if level == 'WARNING' %}selected{% endif %}>WARNING</option>
+            <option value="INFO" {% if level == 'INFO' %}selected{% endif %}>INFO</option>
+            <option value="DEBUG" {% if level == 'DEBUG' %}selected{% endif %}>DEBUG</option>
+          </select>
+        </div>
+        <div class="col-md-4">
+          <label class="form-label">Search Text</label>
+          <input type="text" class="form-control" name="q" placeholder="error, timeout, traceback..." value="{{ q }}">
+        </div>
+        <div class="col-md-2 d-grid">
+          <button type="submit" class="btn btn-primary">Apply</button>
+        </div>
+      </form>
+
+      <div class="row g-3 mb-3">
+        <div class="col-md-3">
+          <div class="border rounded p-3 h-100">
+            <div class="small text-muted-app">Lines scanned</div>
+            <div class="fs-5 fw-semibold">{{ total_scanned }}</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="border rounded p-3 h-100">
+            <div class="small text-muted-app">Matches shown</div>
+            <div class="fs-5 fw-semibold">{{ total_matches }}</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="border rounded p-3 h-100">
+            <div class="small text-muted-app">Errors in scanned tail</div>
+            <div class="fs-5 fw-semibold text-danger">{{ total_errors }}</div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="border rounded p-3 h-100">
+            <div class="small text-muted-app">Warnings in scanned tail</div>
+            <div class="fs-5 fw-semibold text-warning">{{ total_warnings }}</div>
+          </div>
+        </div>
+      </div>
+
+      <p class="mb-2"><strong>Log file:</strong> <span class="text-muted-app">{{ log_path }}</span></p>
+
+      {% if not file_exists %}
+        <div class="alert alert-warning mb-0">No log file found at this path yet. Trigger app activity to generate logs.</div>
+      {% elif not entries %}
+        <div class="alert alert-info mb-0">No log lines matched your current filter.</div>
+      {% else %}
+        <div class="border rounded p-3" style="background:#0f172a; color:#dbeafe; max-height: 65vh; overflow:auto; font-family: Consolas, 'Courier New', monospace; font-size: 13px;">
+          {% for line in entries %}
+            <div>{{ line }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

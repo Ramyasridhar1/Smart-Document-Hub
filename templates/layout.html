@@ -78,7 +78,11 @@
         <li class="nav-item"><a class="nav-link nav-link-custom {% if '/chat' in request.path %}active{% endif %}" href="{{ url_for('chat_page') }}">Chat</a></li>
         {% if is_admin %}
           <li class="nav-item"><a class="nav-link nav-link-custom {% if '/admin' in request.path and '/admin/settings' not in request.path %}active{% endif %}" href="{{ url_for('admin_dashboard') }}">Admin</a></li>
+          <li class="nav-item"><a class="nav-link nav-link-custom {% if '/admin/review' in request.path %}active{% endif %}" href="{{ url_for('admin_review_queue') }}">Review Queue</a></li>
           <li class="nav-item"><a class="nav-link nav-link-custom {% if '/admin/settings' in request.path %}active{% endif %}" href="{{ url_for('admin_settings') }}">Settings</a></li>
+          {% if current_user and current_user.username == config.ADMIN_USER %}
+            <li class="nav-item"><a class="nav-link nav-link-custom {% if '/admin/logs' in request.path %}active{% endif %}" href="{{ url_for('admin_logs') }}">Logs</a></li>
+          {% endif %}
         {% endif %}
       </ul>
       <ul class="navbar-nav">

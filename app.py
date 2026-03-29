@@ -1,10 +1,12 @@
 # ---------------------- IMPORTS ----------------------
 import os
+import base64
 import db_compat as sqlite3
 import time
 import threading
 import shutil
 import logging
+from collections import deque
 from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from flask import Flask, render_template, request, redirect, url_for, jsonify, Response, send_from_directory, abort
@@ -54,9 +56,11 @@ except OSError:
 # ---------------- ML model loader -------------------
 MODEL_PATH = os.path.join("model", "tfidf_logreg.joblib")
 _ml_pipeline = None
+MODEL_VERSION = 'unavailable'
 try:
     if os.path.exists(MODEL_PATH):
         _ml_pipeline = joblib.load(MODEL_PATH)
+        MODEL_VERSION = datetime.utcfromtimestamp(os.path.getmtime(MODEL_PATH)).strftime('%Y%m%d%H%M%S')
         print(">>> ML classifier loaded from:", MODEL_PATH)
     else:
         print(">>> ML model not found at", MODEL_PATH)
@@ -76,6 +80,17 @@ DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://smartdoc:smartdoc@localho
 # Backward-compatible alias used by existing helper calls.
 DB_PATH = DATABASE_URL
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'doc'}
+CLASSIFICATION_CATEGORIES = ['invoice', 'payslip', 'purchase_order', 'minutes', 'resume', 'other']
+
+# Document extraction & OCR settings
+_enable_ocr_str = os.getenv('ENABLE_OCR', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
+ENABLE_OCR = _enable_ocr_str  # OCR disabled by default (slow)
+OCR_DPI = int(os.getenv('OCR_DPI', '200'))  # Lower DPI = faster OCR
+EXTRACT_MAX_TEXT_BYTES = int(os.getenv('EXTRACT_MAX_TEXT_BYTES', '50000'))  # Limit text size
+EXTRACT_PDF_MAX_PAGES = int(os.getenv('EXTRACT_PDF_MAX_PAGES', '10'))  # Only read first N pages
+AUTO_ROUTE_CONFIDENCE_THRESHOLD = float(os.getenv('AUTO_ROUTE_CONFIDENCE_THRESHOLD', '0.75'))
+INBOUND_ADAPTER = (os.getenv('INBOUND_ADAPTER', 'hybrid') or 'hybrid').strip().lower()
+WEBHOOK_SHARED_SECRET = os.getenv('WEBHOOK_SHARED_SECRET', '')
 
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
@@ -275,6 +290,21 @@ def admin_required(f):
     return decorated_function
 
 
+def developer_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        user = get_current_user()
+        if not user or not user.get('is_active'):
+            session.clear()
+            return redirect(url_for('login', next=request.path))
+        if not user.get('is_admin'):
+            return abort(403)
+        if (user.get('username') or '').strip() != (ADMIN_USER or '').strip():
+            return abort(403)
+        return f(*args, **kwargs)
+    return decorated_function
+
+
 def _is_valid_email(value):
     if not value:
         return False
@@ -286,6 +316,13 @@ def _is_valid_email(value):
 def _safe_int(value, default):
     try:
         return int(str(value).strip())
+    except Exception:
+        return default
+
+
+def _safe_float(value, default):
+    try:
+        return float(str(value).strip())
     except Exception:
         return default
 
@@ -326,6 +363,15 @@ def get_runtime_settings():
         'resume_preferred_skills': os.getenv('RESUME_PREFERRED_SKILLS', ''),
         'resume_certificate_bonus': os.getenv('RESUME_CERTIFICATE_BONUS', '10'),
         'resume_project_bonus': os.getenv('RESUME_PROJECT_BONUS', '10'),
+        'auto_route_confidence_threshold': os.getenv('AUTO_ROUTE_CONFIDENCE_THRESHOLD', str(AUTO_ROUTE_CONFIDENCE_THRESHOLD)),
+        'auto_route_threshold_invoice': os.getenv('AUTO_ROUTE_THRESHOLD_INVOICE', ''),
+        'auto_route_threshold_payslip': os.getenv('AUTO_ROUTE_THRESHOLD_PAYSLIP', ''),
+        'auto_route_threshold_purchase_order': os.getenv('AUTO_ROUTE_THRESHOLD_PURCHASE_ORDER', ''),
+        'auto_route_threshold_minutes': os.getenv('AUTO_ROUTE_THRESHOLD_MINUTES', ''),
+        'auto_route_threshold_resume': os.getenv('AUTO_ROUTE_THRESHOLD_RESUME', ''),
+        'auto_route_threshold_other': os.getenv('AUTO_ROUTE_THRESHOLD_OTHER', ''),
+        'inbound_adapter': os.getenv('INBOUND_ADAPTER', INBOUND_ADAPTER),
+        'webhook_shared_secret': os.getenv('WEBHOOK_SHARED_SECRET', WEBHOOK_SHARED_SECRET),
     }
 
     try:
@@ -339,9 +385,20 @@ def get_runtime_settings():
     settings['smtp_port'] = _safe_int(settings.get('smtp_port'), 587)
     settings['imap_port'] = _safe_int(settings.get('imap_port'), 993)
     settings['imap_poll_seconds'] = _safe_int(settings.get('imap_poll_seconds'), 20)
+    settings['auto_route_confidence_threshold'] = max(0.0, min(1.0, _safe_float(settings.get('auto_route_confidence_threshold'), AUTO_ROUTE_CONFIDENCE_THRESHOLD)))
     settings['route_local_enabled'] = _bool_from_str(settings.get('route_local_enabled'), default=True)
     settings['route_email_enabled'] = _bool_from_str(settings.get('route_email_enabled'), default=True)
+    settings['inbound_adapter'] = (settings.get('inbound_adapter') or INBOUND_ADAPTER).strip().lower()
     return settings
+
+
+def get_auto_route_threshold(category, runtime):
+    global_threshold = max(0.0, min(1.0, _safe_float(runtime.get('auto_route_confidence_threshold'), AUTO_ROUTE_CONFIDENCE_THRESHOLD)))
+    specific_key = f'auto_route_threshold_{category}'
+    raw = runtime.get(specific_key)
+    if raw is None or str(raw).strip() == '':
+        return global_threshold
+    return max(0.0, min(1.0, _safe_float(raw, global_threshold)))
 
 
 def audit_log(action, details=''):
@@ -383,7 +440,12 @@ def init_db(db_url=None):
                     resume_score DOUBLE PRECISION,
                     resume_rank_note TEXT,
                     resume_risk_score DOUBLE PRECISION,
-                    resume_risk_flags TEXT
+                    resume_risk_flags TEXT,
+                    ml_confidence DOUBLE PRECISION,
+                    top_candidates TEXT,
+                    model_version TEXT,
+                    processing_status TEXT,
+                    processing_error TEXT
                 )''')
     c.execute('''CREATE TABLE IF NOT EXISTS chats (
                     id BIGSERIAL PRIMARY KEY,
@@ -422,6 +484,11 @@ def init_db(db_url=None):
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_rank_note TEXT")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_risk_score DOUBLE PRECISION")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_risk_flags TEXT")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS ml_confidence DOUBLE PRECISION")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS top_candidates TEXT")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS model_version TEXT")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS processing_status TEXT")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS processing_error TEXT")
     conn.commit()
 
     # Bootstrap admin user if not present.
@@ -454,6 +521,14 @@ def init_db(db_url=None):
         'resume_preferred_skills': os.getenv('RESUME_PREFERRED_SKILLS', ''),
         'resume_certificate_bonus': os.getenv('RESUME_CERTIFICATE_BONUS', '10'),
         'resume_project_bonus': os.getenv('RESUME_PROJECT_BONUS', '10'),
+        'auto_route_confidence_threshold': os.getenv('AUTO_ROUTE_CONFIDENCE_THRESHOLD', str(AUTO_ROUTE_CONFIDENCE_THRESHOLD)),
+        'auto_route_threshold_invoice': os.getenv('AUTO_ROUTE_THRESHOLD_INVOICE', ''),
+        'auto_route_threshold_payslip': os.getenv('AUTO_ROUTE_THRESHOLD_PAYSLIP', ''),
+        'auto_route_threshold_purchase_order': os.getenv('AUTO_ROUTE_THRESHOLD_PURCHASE_ORDER', ''),
+        'auto_route_threshold_minutes': os.getenv('AUTO_ROUTE_THRESHOLD_MINUTES', ''),
+        'auto_route_threshold_resume': os.getenv('AUTO_ROUTE_THRESHOLD_RESUME', ''),
+        'auto_route_threshold_other': os.getenv('AUTO_ROUTE_THRESHOLD_OTHER', ''),
+        'inbound_adapter': os.getenv('INBOUND_ADAPTER', INBOUND_ADAPTER),
     }
     for key, value in defaults.items():
         c.execute('SELECT 1 FROM settings WHERE key = ?', (key,))
@@ -472,6 +547,114 @@ def init_db(db_url=None):
 # ---------------------------------
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _guess_quick_category_from_file(saved_path):
+    try:
+        with open(saved_path, 'rb') as f:
+            peek_text = f.read(5000).decode('utf-8', errors='ignore').lower()
+    except Exception:
+        peek_text = ''
+
+    if 'invoice' in peek_text or 'amount due' in peek_text:
+        return 'invoice'
+    if 'payslip' in peek_text or 'salary' in peek_text:
+        return 'payslip'
+    if 'purchase order' in peek_text or 'po no' in peek_text:
+        return 'purchase_order'
+    if 'minutes' in peek_text or 'agenda' in peek_text:
+        return 'minutes'
+    if 'resume' in peek_text or 'curriculum vitae' in peek_text:
+        return 'resume'
+    return 'other'
+
+
+def _save_and_queue_file(saved_filename, source_path, upload_root, uploader_email):
+    quick_category = _guess_quick_category_from_file(source_path)
+    cat_folder = ''.join(ch for ch in quick_category if ch.isalnum() or ch in ('_', '-')).lower() or 'other'
+    target_dir = os.path.join(upload_root, cat_folder)
+    os.makedirs(target_dir, exist_ok=True)
+    dest_path = os.path.join(target_dir, saved_filename)
+    try:
+        shutil.move(source_path, dest_path)
+        source_path = dest_path
+    except Exception as e:
+        logger.warning('Move to category folder failed for %s: %s', saved_filename, e)
+
+    upload_id = create_upload_pending(saved_filename, source_path, uploader_email)
+    return {
+        'filename': saved_filename,
+        'saved_path': source_path,
+        'uploader_email': uploader_email,
+        'quick_category': quick_category,
+        'upload_id': upload_id,
+    }
+
+
+def _normalize_webhook_json_payload(payload):
+    """Normalize provider-specific webhook payloads to (sender, attachments)."""
+    sender = None
+    attachments = []
+    provider = str(payload.get('provider') or payload.get('source') or '').strip().lower()
+
+    # Sender detection across common payload styles.
+    sender = (
+        payload.get('sender')
+        or payload.get('uploader_email')
+        or payload.get('email')
+        or payload.get('from')
+    )
+    if isinstance(sender, dict):
+        sender = sender.get('emailAddress', {}).get('address') or sender.get('address')
+
+    message = payload.get('message') if isinstance(payload.get('message'), dict) else {}
+    if not sender:
+        sender = message.get('from')
+        if isinstance(sender, dict):
+            sender = sender.get('emailAddress', {}).get('address') or sender.get('address')
+
+    candidate_lists = []
+    if isinstance(payload.get('attachments'), list):
+        candidate_lists.append(payload.get('attachments'))
+    if isinstance(message.get('attachments'), list):
+        candidate_lists.append(message.get('attachments'))
+
+    # Microsoft Graph notifications often carry resourceData/value arrays.
+    if isinstance(payload.get('value'), list):
+        for item in payload.get('value'):
+            if not isinstance(item, dict):
+                continue
+            resource_data = item.get('resourceData') if isinstance(item.get('resourceData'), dict) else {}
+            if isinstance(resource_data.get('attachments'), list):
+                candidate_lists.append(resource_data.get('attachments'))
+            if not sender:
+                sender_candidate = item.get('from') or resource_data.get('from')
+                if isinstance(sender_candidate, dict):
+                    sender_candidate = sender_candidate.get('emailAddress', {}).get('address') or sender_candidate.get('address')
+                sender = sender or sender_candidate
+
+    for items in candidate_lists:
+        for att in items:
+            if not isinstance(att, dict):
+                continue
+            name = att.get('filename') or att.get('name') or att.get('fileName') or att.get('attachmentName')
+            content_b64 = att.get('contentBytes') or att.get('data') or att.get('content') or att.get('base64')
+            if not name or not content_b64:
+                continue
+            filename = secure_filename(str(name))
+            if not filename or not allowed_file(filename):
+                continue
+            try:
+                raw = base64.b64decode(str(content_b64), validate=False)
+            except Exception:
+                continue
+            attachments.append({'filename': filename, 'content': raw})
+
+    return {
+        'provider': provider or 'generic-json',
+        'sender': (sender or '').strip() or None,
+        'attachments': attachments,
+    }
 
 
 def _normalize_dir(path_value):
@@ -522,75 +705,114 @@ def simple_summarize(text, max_sentences=4):
     return cleaned[:500]
 
 
-def extract_text(file_path, ocr_dpi=300, max_pages_for_ocr=50):
+def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=None, timeout_seconds=10):
+    """Extract text from files with OCR disabled by default (too slow).
+    
+    Args:
+        file_path: Path to file to extract from
+        ocr_dpi: DPI for OCR (lower=faster but lower quality, default from OCR_DPI env)
+        max_pages_for_ocr: Max pages to OCR (default from env)
+        enable_ocr: If False, skip OCR entirely. Default from ENABLE_OCR env var.
+        timeout_seconds: Timeout for OCR operations
+    """
     if not file_path or not os.path.exists(file_path):
         return ""
+    
+    # Use global config if not overridden
+    if ocr_dpi is None:
+        ocr_dpi = OCR_DPI
+    if max_pages_for_ocr is None:
+        max_pages_for_ocr = 3
+    if enable_ocr is None:
+        enable_ocr = ENABLE_OCR
 
     ext = file_path.rsplit('.', 1)[-1].lower()
 
     try:
         if ext == 'txt':
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.read()
+                return f.read()[:EXTRACT_MAX_TEXT_BYTES]  # limit text to configured max
 
         if ext == 'pdf':
             try:
                 texts = []
                 with pdfplumber.open(file_path) as pdf:
-                    for page in pdf.pages:
+                    # Only process first N pages for text extraction
+                    for i, page in enumerate(pdf.pages[:EXTRACT_PDF_MAX_PAGES]):
+                        if i >= EXTRACT_PDF_MAX_PAGES:
+                            break
                         page_text = page.extract_text()
                         if page_text:
                             texts.append(page_text)
                 combined = "\n".join(texts).strip()
                 if combined:
-                    return combined
+                    return combined[:EXTRACT_MAX_TEXT_BYTES]  # limit to configured max
             except Exception as e:
-                print("pdfplumber error:", e)
+                logger.debug("pdfplumber error: %s", e)
+
+            # Only do OCR if explicitly enabled (very slow!)
+            if not enable_ocr:
+                logger.debug("OCR disabled for %s (pdfplumber found no text)", file_path)
+                return ""  # Return empty instead of doing slow OCR
 
             try:
-                images = convert_from_path(file_path, dpi=ocr_dpi)
+                import signal
+                def timeout_handler(signum, frame):
+                    raise TimeoutError(f"OCR timeout after {timeout_seconds}s")
+                
+                # Convert only first 3 pages to images (not entire document)
+                images = convert_from_path(file_path, dpi=ocr_dpi, first_page=1, last_page=min(3, 999))
             except Exception as e:
-                print("pdf2image error:", e)
+                logger.debug("pdf2image error: %s", e)
                 return ""
             ocr_texts = []
             for i, img in enumerate(images):
                 if i >= max_pages_for_ocr:
                     break
                 try:
-                    txt = pytesseract.image_to_string(img)
+                    txt = pytesseract.image_to_string(img, timeout=timeout_seconds)
                     if txt and txt.strip():
                         ocr_texts.append(txt)
                 except Exception as e:
-                    print("pytesseract error on page", i, e)
-            return "\n".join(ocr_texts).strip()
+                    logger.debug("pytesseract error on page %d: %s", i, e)
+            return ("\n".join(ocr_texts).strip())[:EXTRACT_MAX_TEXT_BYTES]  # limit to configured max
 
         if ext in ('docx', 'doc'):
             try:
                 document = docx.Document(file_path)
                 paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
-                return "\n".join(paragraphs).strip()
+                return ("\n".join(paragraphs).strip())[:EXTRACT_MAX_TEXT_BYTES]  # limit to configured max
             except Exception as e:
-                print("docx error:", e)
+                logger.debug("docx error: %s", e)
                 return ""
 
     except Exception as e:
-        print("extract_text general error:", e)
+        logger.debug("extract_text general error: %s", e)
         return ""
 
     return ""
 
 
-def classify_document(text):
+def classify_document_with_confidence(text):
     t = (text or "").lower()
     if _ml_pipeline is not None:
         try:
             pred = _ml_pipeline.predict([text or ""])[0]
             if hasattr(_ml_pipeline, "predict_proba"):
                 probs = _ml_pipeline.predict_proba([text or ""])[0]
-                if max(probs) >= 0.45:
-                    return str(pred)
+                classes = list(getattr(_ml_pipeline, 'classes_', []))
+                indexed = sorted(
+                    [(classes[i] if i < len(classes) else f'class_{i}', float(p)) for i, p in enumerate(probs)],
+                    key=lambda item: item[1],
+                    reverse=True,
+                )
+                best_class = str(pred)
+                best_conf = float(max(probs))
+                top_candidates = ', '.join(f"{name}:{score:.2f}" for name, score in indexed[:2])
+                if best_conf >= 0.45:
+                    return best_class, round(best_conf, 4), top_candidates
             else:
-                return str(pred)
+                return str(pred), 0.7, f"{pred}:0.70"
         except Exception as e:
             logger.warning("ML classify fallback to keywords: %s", e)
 
@@ -608,8 +830,19 @@ def classify_document(text):
         'resume': sum(t.count(k) for k in resume_keywords),
     }
 
-    best = max(scores, key=scores.get)
-    return best if scores[best] >= 2 else 'other'
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    best = ranked[0][0]
+    best_score = ranked[0][1]
+    top_candidates = ', '.join(f"{name}:{score}" for name, score in ranked[:2])
+    if best_score >= 2:
+        confidence = min(0.65, 0.35 + (best_score * 0.05))
+        return best, round(confidence, 4), top_candidates
+    return 'other', 0.2, top_candidates
+
+
+def classify_document(text):
+    category, _, _ = classify_document_with_confidence(text)
+    return category
 
 
 def parse_resume_preferences(runtime):
@@ -678,11 +911,11 @@ def assess_resume_risk(text):
     return min(100.0, round(risk, 2)), flags
 
 
-def log_upload(filename, saved_path, summary, category, uploader_email=None, resume_score=None, resume_rank_note=None, resume_risk_score=None, resume_risk_flags=None):
+def log_upload(filename, saved_path, summary, category, uploader_email=None, resume_score=None, resume_rank_note=None, resume_risk_score=None, resume_risk_flags=None, ml_confidence=None, top_candidates=None, model_version=None, processing_status='completed', processing_error=None):
     conn = sqlite3.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute(
-        'INSERT INTO uploads (filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_rank_note, resume_risk_score, resume_risk_flags) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO uploads (filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_rank_note, resume_risk_score, resume_risk_flags, ml_confidence, top_candidates, model_version, processing_status, processing_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (
             filename,
             saved_path,
@@ -694,10 +927,90 @@ def log_upload(filename, saved_path, summary, category, uploader_email=None, res
             resume_rank_note,
             resume_risk_score,
             ', '.join(resume_risk_flags or []) if isinstance(resume_risk_flags, list) else resume_risk_flags,
+            ml_confidence,
+            top_candidates,
+            model_version,
+            processing_status,
+            processing_error,
         )
     )
     conn.commit()
     conn.close()
+
+
+def create_upload_pending(filename, saved_path, uploader_email=None):
+    conn = sqlite3.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute(
+        '''INSERT INTO uploads (filename, saved_path, summary, category, uploader_email, uploaded_at, model_version, processing_status)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id''',
+        (
+            filename,
+            saved_path,
+            'Processing started',
+            'pending',
+            uploader_email,
+            datetime.utcnow().isoformat(),
+            MODEL_VERSION,
+            'queued',
+        ),
+    )
+    row = c.fetchone()
+    conn.commit()
+    conn.close()
+    return row[0] if row else None
+
+
+def update_upload_record(upload_id, **updates):
+    if not upload_id or not updates:
+        return
+    allowed = {
+        'summary', 'category', 'resume_score', 'resume_rank_note', 'resume_risk_score', 'resume_risk_flags',
+        'ml_confidence', 'top_candidates', 'model_version', 'processing_status', 'processing_error'
+    }
+    fields = []
+    params = []
+    for key, value in updates.items():
+        if key in allowed:
+            fields.append(f"{key} = ?")
+            params.append(value)
+    if not fields:
+        return
+    params.append(upload_id)
+    conn = sqlite3.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute(f"UPDATE uploads SET {', '.join(fields)} WHERE id = ?", params)
+    conn.commit()
+    conn.close()
+
+
+def get_latest_upload_by_filename(filename):
+    conn = sqlite3.connect(DATABASE_URL)
+    c = conn.cursor()
+    c.execute(
+        '''SELECT id, filename, category, summary, processing_status, ml_confidence, top_candidates,
+                  processing_error, resume_score, resume_risk_score, resume_risk_flags
+           FROM uploads WHERE filename = ?
+           ORDER BY uploaded_at DESC LIMIT 1''',
+        (filename,),
+    )
+    row = c.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': row[0],
+        'filename': row[1],
+        'category': row[2],
+        'summary': row[3],
+        'processing_status': row[4],
+        'ml_confidence': row[5],
+        'top_candidates': row[6],
+        'processing_error': row[7],
+        'resume_score': row[8],
+        'resume_risk_score': row[9],
+        'resume_risk_flags': row[10],
+    }
 
 
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None, attachment_name=None):
@@ -792,6 +1105,88 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
         print("Email send error (multiple attachments):", e)
         return False
 
+
+def process_document_in_background(file_path, filename, uploader_email, upload_id=None):
+    """
+    Process a document in the background (extract, classify, summarize, log).
+    This runs in a separate thread to avoid blocking the upload response.
+    """
+    try:
+        logger.info("🔄 Background processing started for: %s", filename)
+        runtime = get_runtime_settings()
+        
+        update_upload_record(upload_id, processing_status='extracting')
+        # Extract text (OCR setting from ENABLE_OCR env var)
+        text = extract_text(file_path, enable_ocr=ENABLE_OCR)
+        
+        # Summarize
+        summary = simple_summarize(text)
+        
+        update_upload_record(upload_id, processing_status='classifying')
+        category, confidence, top_candidates = classify_document_with_confidence(text)
+        threshold = get_auto_route_threshold(category, runtime)
+        requires_review = confidence < threshold
+        if requires_review:
+            category = 'review_required'
+        
+        # Resume scoring if applicable
+        resume_score = None
+        resume_rank_note = None
+        resume_risk_score = None
+        resume_risk_flags = None
+        
+        if category == 'resume':
+            prefs = parse_resume_preferences(runtime)
+            resume_score, resume_rank_note = score_resume(text, prefs)
+            resume_risk_score, resume_risk_flags = assess_resume_risk(text)
+
+        status_value = 'review_required' if requires_review else 'completed'
+        processing_error = None
+        if requires_review:
+            processing_error = f'Low classification confidence ({confidence:.2f}) below threshold ({threshold:.2f}); held for manual review.'
+
+        update_upload_record(
+            upload_id,
+            summary=summary,
+            category=category,
+            resume_score=resume_score,
+            resume_rank_note=resume_rank_note,
+            resume_risk_score=resume_risk_score,
+            resume_risk_flags=', '.join(resume_risk_flags or []) if isinstance(resume_risk_flags, list) else resume_risk_flags,
+            ml_confidence=confidence,
+            top_candidates=top_candidates,
+            model_version=MODEL_VERSION,
+            processing_status=status_value,
+            processing_error=processing_error,
+        )
+        
+        # Optional local routing output copy
+        if runtime.get('route_local_enabled') and not requires_review:
+            route_dir = get_route_output_dir(category, runtime)
+            if route_dir:
+                try:
+                    os.makedirs(route_dir, exist_ok=True)
+                    routed_path = os.path.join(route_dir, filename)
+                    shutil.copy2(file_path, routed_path)
+                except Exception as e:
+                    logger.warning('Failed to copy routed file to %s: %s', route_dir, e)
+        
+        # Optional auto-reply to uploader
+        if uploader_email:
+            from_name = runtime.get('from_name') or FROM_NAME
+            reply_subject = f"Receipt: {filename} (classified: {category})"
+            reply_body = f"Hi,\n\nWe processed your file '{filename}'.\nCategory: {category}\nSummary:\n{summary}\n\nThanks,\n{from_name}"
+            try:
+                send_email_with_attachment(uploader_email, reply_subject, reply_body, None, None)
+            except Exception as e:
+                logger.warning("Auto-reply failed for %s: %s", uploader_email, e)
+        
+        logger.info("✅ Background processing completed for: %s (category: %s)", filename, category)
+        
+    except Exception as e:
+        update_upload_record(upload_id, processing_status='failed', processing_error=str(e))
+        logger.error("❌ Background processing failed for %s: %s", filename, e)
+
 def route_for_category(category):
     runtime = get_runtime_settings()
     mapping = {
@@ -816,6 +1211,13 @@ def index():
 @app.route('/upload', methods=['POST'])
 @login_required
 def upload_file():
+    """
+    Optimized upload endpoint:
+    - Saves files immediately (fast)
+    - Moves to category folders immediately
+    - Returns success page immediately
+    - Processing (extraction, classification, etc.) happens in background threads
+    """
     if 'file' not in request.files:
         return redirect(request.url)
 
@@ -825,11 +1227,17 @@ def upload_file():
     if not files or all(f.filename == '' for f in files):
         return redirect(request.url)
 
-    results = []  # collect all results for the batch
     runtime = get_runtime_settings()
     upload_root = _normalize_dir(runtime.get('upload_folder')) or os.path.abspath(UPLOAD_FOLDER)
     app.config['UPLOAD_FOLDER'] = upload_root
+    
+    results = []  # For display in response (minimal info)
+    batch_sent_info = []
 
+    # ===== PHASE 1: Save files immediately (fast) =====
+    os.makedirs(upload_root, exist_ok=True)
+    saved_files = []
+    
     for file in files:
         if not (file and allowed_file(file.filename)):
             continue
@@ -838,187 +1246,321 @@ def upload_file():
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
         saved_filename = f"{timestamp}_{filename}"
         saved_path = os.path.join(upload_root, saved_filename)
-
-        os.makedirs(upload_root, exist_ok=True)
+        
+        # Save file
         file.save(saved_path)
-
-        # Extract, summarize, classify
-        text = extract_text(saved_path)
-        summary = simple_summarize(text)
-        category = classify_document(text)
-        resume_score = None
-        resume_rank_note = None
-        resume_risk_score = None
-        resume_risk_flags = None
-
-        if category == 'resume':
-            prefs = parse_resume_preferences(runtime)
-            resume_score, resume_rank_note = score_resume(text, prefs)
-            resume_risk_score, resume_risk_flags = assess_resume_risk(text)
-
-        # Create category folder and move file there
-        cat_folder = (category if category else 'other')
-        cat_folder = "".join(ch for ch in cat_folder if ch.isalnum() or ch in ('_', '-')).lower() or 'other'
+        
+        # Quick classification guess (keywords only, no ML) for folder routing
+        with open(saved_path, 'rb') as f:
+            try:
+                # Quick text peek for classification
+                peek_text = f.read(5000).decode('utf-8', errors='ignore').lower()
+            except:
+                peek_text = ""
+        
+        # Simple keyword-based quick classification for folder
+        if 'invoice' in peek_text or 'amount due' in peek_text:
+            quick_category = 'invoice'
+        elif 'payslip' in peek_text or 'salary' in peek_text:
+            quick_category = 'payslip'
+        elif 'purchase order' in peek_text or 'po no' in peek_text:
+            quick_category = 'purchase_order'
+        elif 'minutes' in peek_text or 'agenda' in peek_text:
+            quick_category = 'minutes'
+        elif 'resume' in peek_text or 'curriculum vitae' in peek_text:
+            quick_category = 'resume'
+        else:
+            quick_category = 'other'
+        
+        # Create category folder and move file (fast operation)
+        cat_folder = "".join(ch for ch in quick_category if ch.isalnum() or ch in ('_', '-')).lower() or 'other'
         target_dir = os.path.join(upload_root, cat_folder)
         os.makedirs(target_dir, exist_ok=True)
         dest_path = os.path.join(target_dir, saved_filename)
+        
         try:
             shutil.move(saved_path, dest_path)
             saved_path = dest_path
         except Exception as e:
-            print("⚠️ Warning: failed to move file to category folder:", e)
-            # saved_path remains original if move fails
-
-        # Log upload
-        log_upload(
-            saved_filename,
-            saved_path,
-            summary,
-            category,
-            uploader_email,
-            resume_score=resume_score,
-            resume_rank_note=resume_rank_note,
-            resume_risk_score=resume_risk_score,
-            resume_risk_flags=resume_risk_flags,
-        )
-
-        # Optional local routing output copy.
-        if runtime.get('route_local_enabled'):
-            route_dir = get_route_output_dir(category, runtime)
-            if route_dir:
-                try:
-                    os.makedirs(route_dir, exist_ok=True)
-                    routed_path = os.path.join(route_dir, saved_filename)
-                    shutil.copy2(saved_path, routed_path)
-                except Exception as e:
-                    logger.warning('Failed to copy routed file to %s: %s', route_dir, e)
-
-        # NOTE: per-file forwarding removed here (we do batch forwarding after the loop)
-
-        # record result details for later (including route target if configured)
-        forward_to = route_for_category(category)
-        results.append({
+            logger.warning("Failed to move file to category folder: %s", e)
+        
+        saved_files.append({
             'filename': saved_filename,
-            'category': category,
-            'summary': summary,
-            'route': forward_to,
             'saved_path': saved_path,
             'uploader_email': uploader_email,
-            'resume_score': resume_score,
-            'resume_rank_note': resume_rank_note,
-            'resume_risk_score': resume_risk_score,
-            'resume_risk_flags': resume_risk_flags,
+            'quick_category': quick_category,
+            'upload_id': create_upload_pending(saved_filename, saved_path, uploader_email),
+        })
+        
+        results.append({
+            'filename': saved_filename,
+            'category': quick_category,
+            'summary': 'Queued for processing...',
+            'processing_status': 'queued',
+            'ml_confidence': None,
+            'top_candidates': '-',
+            'saved_path': saved_path,
+            'route': route_for_category(quick_category),
         })
 
-    if not results:
+    if not saved_files:
         return "No valid files uploaded.", 400
 
-    # ------------------ BATCH FORWARDING (group by recipient) ------------------
-    from collections import defaultdict
-    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
-    batch_map = defaultdict(list)
-
-    # Group items by recipient (route field)
+    # ===== PHASE 2: Start background processing threads =====
+    # Process each file in background threads (extraction, classification, etc.)
+    for file_info in saved_files:
+        thread = threading.Thread(
+            target=process_document_in_background,
+            args=(file_info['saved_path'], file_info['filename'], file_info['uploader_email'], file_info.get('upload_id')),
+            daemon=True
+        )
+        thread.start()
+    
+    # ===== PHASE 3: Start background email forwarding thread =====
+    # Email batch forwarding happens asynchronously
     if runtime.get('route_email_enabled'):
-        for r in results:
-            target = r.get('route')
-            if target:
-                batch_map[target].append(r)
+        thread = threading.Thread(
+            target=_send_batch_emails_async,
+            args=(saved_files, runtime),
+            daemon=True
+        )
+        thread.start()
 
-    # For each recipient, create an in-memory CSV, save temporarily, send once, then delete
-    batch_sent_info = []
-    for recipient, items in batch_map.items():
-        # build CSV summary
-        si = StringIO()
-        writer = csv.writer(si)
-        writer.writerow(['filename', 'category', 'summary', 'saved_path'])
-        for it in items:
-            writer.writerow([
-                it.get('filename'),
-                it.get('category') or '',
-                (it.get('summary') or '').replace('\n', ' ')[:2000],
-                it.get('saved_path') or ''
-            ])
-        csv_text = si.getvalue()
-        si.close()
+    # ===== Return immediately without waiting for processing =====
+    return render_template('result_batch.html', results=results)
 
-        csv_name = f"batch_summary_{timestamp}_{recipient.replace('@','_at_').replace('.','_')}.csv"
-        csv_path = os.path.join(upload_root, csv_name)
-        try:
-            with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-                f.write(csv_text)
-        except Exception as e:
-            print("Failed to write batch CSV:", e)
+
+@app.route('/ingest/webhook/email', methods=['POST'])
+def webhook_ingest_email():
+    runtime = get_runtime_settings()
+    inbound_adapter = (runtime.get('inbound_adapter') or INBOUND_ADAPTER).lower()
+    if inbound_adapter not in {'webhook', 'hybrid'}:
+        return jsonify({'ok': False, 'error': 'Webhook intake is disabled by inbound adapter mode.'}), 403
+
+    expected_secret = (runtime.get('webhook_shared_secret') or WEBHOOK_SHARED_SECRET or '').strip()
+    provided_secret = (request.headers.get('X-Webhook-Secret') or request.args.get('secret') or '').strip()
+    if expected_secret and provided_secret != expected_secret:
+        return jsonify({'ok': False, 'error': 'Unauthorized webhook secret.'}), 401
+
+    files = request.files.getlist('file')
+    if not files:
+        # Fallback for generic multipart payloads with arbitrary field names.
+        files = list(request.files.values())
+
+    uploader_email = (request.form.get('sender') or request.form.get('uploader_email') or request.form.get('email') or '').strip() or None
+    source_label = 'webhook-multipart'
+
+    json_attachments = []
+    if request.is_json:
+        payload = request.get_json(silent=True) or {}
+        normalized = _normalize_webhook_json_payload(payload)
+        json_attachments = normalized.get('attachments') or []
+        uploader_email = uploader_email or normalized.get('sender')
+        source_label = normalized.get('provider') or 'generic-json'
+
+    if (not files or all((not f) or (not f.filename) for f in files)) and not json_attachments:
+        return jsonify({'ok': False, 'error': 'No files found in webhook payload. Provide multipart files or JSON base64 attachments.'}), 400
+
+    upload_root = _normalize_dir(runtime.get('upload_folder')) or os.path.abspath(UPLOAD_FOLDER)
+    app.config['UPLOAD_FOLDER'] = upload_root
+    os.makedirs(upload_root, exist_ok=True)
+
+    results = []
+    saved_files = []
+    for file in files:
+        if not (file and file.filename and allowed_file(file.filename)):
             continue
 
-        # prepare attachments: actual files + the CSV summary
-        attachment_paths = []
-        attachment_names = []
+        filename = secure_filename(file.filename)
+        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        saved_filename = f"{timestamp}_{filename}"
+        saved_path = os.path.join(upload_root, saved_filename)
+        file.save(saved_path)
 
-        # Attach actual files (only those that exist)
-        for it in items:
-            p = it.get('saved_path')
-            if p and os.path.exists(p) and os.path.isfile(p):
-                attachment_paths.append(p)
-                attachment_names.append(os.path.basename(p))
-            else:
-                print(f"⚠️ Skipping missing file for attachment: {p}")
+        queued = _save_and_queue_file(saved_filename, saved_path, upload_root, uploader_email)
+        saved_files.append({
+            'filename': queued['filename'],
+            'saved_path': queued['saved_path'],
+            'uploader_email': queued['uploader_email'],
+            'upload_id': queued['upload_id'],
+        })
+        results.append({
+            'upload_id': queued['upload_id'],
+            'filename': queued['filename'],
+            'quick_category': queued['quick_category'],
+            'status': 'queued',
+        })
 
-        # Attach the CSV summary as last attachment
-        attachment_paths.append(csv_path)
-        attachment_names.append(os.path.basename(csv_path))
-
-        subj = f"[Batch Forwarded Files] {len(items)} files - {timestamp}"
-        body_lines = [
-            "Hello,",
-            "",
-            f"This is an automated batch of files classified and routed to you.",
-            "",
-            "Files included:"
-        ]
-        for it in items:
-            body_lines.append(f"- {it.get('filename')}  (category: {it.get('category')})")
-            first_line = (it.get('summary') or "").splitlines()[0] if it.get('summary') else ''
-            if first_line:
-                body_lines.append(f"    summary: {first_line[:200]}")
-        body_lines.extend(["", "Both the original files and a CSV summary are attached."])
-        body = "\n".join(body_lines)
-
-        # send actual files + csv in one email
-        print(f"📤 Sending {len(attachment_paths)} attachments to {recipient} ...")
-        sent = send_email_with_attachments(recipient, subj, body, attachment_paths=attachment_paths, attachment_names=attachment_names)
-        batch_sent_info.append((recipient, sent))
-        print(f"📨 send_email_with_attachments returned {sent} for {recipient}")
-
-        # cleanup temp csv (we do not remove original uploaded files)
+    # Provider-style JSON attachments (Gmail/Graph-like) with base64 content.
+    for item in json_attachments:
+        filename = secure_filename(item.get('filename') or '')
+        if not filename:
+            continue
+        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        saved_filename = f"{timestamp}_{filename}"
+        saved_path = os.path.join(upload_root, saved_filename)
         try:
-            if os.path.exists(csv_path):
-                os.remove(csv_path)
-                print(f"🧹 Deleted temporary CSV: {csv_path}")
+            with open(saved_path, 'wb') as f:
+                f.write(item.get('content') or b'')
         except Exception as e:
-            print("⚠️ Failed to delete temp CSV:", e)
-    # -------------------------------------------------------------------------
+            logger.warning('Webhook JSON attachment save failed for %s: %s', saved_filename, e)
+            continue
 
-    # Optional: send auto-replies to uploaders (one per uploader)
-    # This preserves the auto-reply behavior but sends only one reply per uploader/file
-    for r in results:
-        uploader = r.get('uploader_email')
-        if uploader:
-            runtime = get_runtime_settings()
-            from_name = runtime.get('from_name') or FROM_NAME
-            reply_subject = f"Receipt: {r.get('filename')} (classified: {r.get('category')})"
-            reply_body = f"Hi,\n\nWe processed your file '{r.get('filename')}'.\nCategory: {r.get('category')}\nSummary:\n{r.get('summary')}\n\nThanks,\n{from_name}"
+        queued = _save_and_queue_file(saved_filename, saved_path, upload_root, uploader_email)
+        saved_files.append({
+            'filename': queued['filename'],
+            'saved_path': queued['saved_path'],
+            'uploader_email': queued['uploader_email'],
+            'upload_id': queued['upload_id'],
+        })
+        results.append({
+            'upload_id': queued['upload_id'],
+            'filename': queued['filename'],
+            'quick_category': queued['quick_category'],
+            'status': 'queued',
+        })
+
+    if not saved_files:
+        return jsonify({'ok': False, 'error': 'No supported document files found.'}), 400
+
+    for file_info in saved_files:
+        thread = threading.Thread(
+            target=process_document_in_background,
+            args=(file_info['saved_path'], file_info['filename'], file_info['uploader_email'], file_info.get('upload_id')),
+            daemon=True,
+        )
+        thread.start()
+
+    if runtime.get('route_email_enabled'):
+        thread = threading.Thread(
+            target=_send_batch_emails_async,
+            args=(saved_files, runtime),
+            daemon=True,
+        )
+        thread.start()
+
+    return jsonify({'ok': True, 'source': source_label, 'queued': len(saved_files), 'items': results}), 202
+
+
+def _send_batch_emails_async(saved_files, runtime):
+    """Send batch emails in background (after file processing completes)."""
+    try:
+        # Give processing threads time to complete (max 30 seconds)
+        logger.info("⏳ Waiting for document processing before sending batch emails...")
+        time.sleep(5)
+        
+        timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+        upload_root = _normalize_dir(runtime.get('upload_folder')) or os.path.abspath(UPLOAD_FOLDER)
+        
+        # Query processed documents and group by recipient
+        from collections import defaultdict
+        batch_map = defaultdict(list)
+        
+        for file_info in saved_files:
             try:
-                send_email_with_attachment(uploader, reply_subject, reply_body, None, None)
+                conn = get_db_conn()
+                c = conn.cursor()
+                c.execute(
+                    'SELECT filename, category, summary, saved_path, processing_status FROM uploads WHERE filename = ? ORDER BY uploaded_at DESC LIMIT 1',
+                    (file_info['filename'],)
+                )
+                row = c.fetchone()
+                conn.close()
+                
+                if row and row[4] == 'completed':
+                    category = row[1]
+                    forward_to = route_for_category(category)
+                    if forward_to:
+                        batch_map[forward_to].append({
+                            'filename': row[0],
+                            'category': row[1],
+                            'summary': row[2] or '',
+                            'saved_path': row[3],
+                        })
             except Exception as e:
-                print("Auto-reply failed for", uploader, e)
+                logger.warning("Failed to fetch processed file info: %s", e)
+        
+        # Send batch emails
+        for recipient, items in batch_map.items():
+            si = StringIO()
+            writer = csv.writer(si)
+            writer.writerow(['filename', 'category', 'summary', 'saved_path'])
+            for it in items:
+                writer.writerow([
+                    it.get('filename'),
+                    it.get('category') or '',
+                    (it.get('summary') or '').replace('\n', ' ')[:2000],
+                    it.get('saved_path') or ''
+                ])
+            csv_text = si.getvalue()
+            si.close()
 
-    return render_template('result_batch.html', results=results)
+            csv_name = f"batch_summary_{timestamp}_{recipient.replace('@','_at_').replace('.','_')}.csv"
+            csv_path = os.path.join(upload_root, csv_name)
+            
+            try:
+                with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+                    f.write(csv_text)
+            except Exception as e:
+                logger.warning("Failed to write batch CSV: %s", e)
+                continue
+
+            attachment_paths = [csv_path]
+            attachment_names = [os.path.basename(csv_path)]
+
+            # Attach actual files
+            for it in items:
+                p = it.get('saved_path')
+                if p and os.path.exists(p) and os.path.isfile(p):
+                    attachment_paths.append(p)
+                    attachment_names.append(os.path.basename(p))
+
+            subj = f"[Batch Forwarded Files] {len(items)} files - {timestamp}"
+            body_lines = [
+                "Hello,",
+                "",
+                "This is an automated batch of files classified and routed to you.",
+                "",
+                "Files included:"
+            ]
+            for it in items:
+                body_lines.append(f"- {it.get('filename')} (category: {it.get('category')})")
+            body_lines.extend(["", "Both the original files and a CSV summary are attached."])
+            body = "\n".join(body_lines)
+
+            logger.info("📤 Sending batch email to %s with %d files...", recipient, len(items))
+            send_email_with_attachments(recipient, subj, body, attachment_paths=attachment_paths, attachment_names=attachment_names)
+            
+            # Cleanup temp CSV
+            try:
+                if os.path.exists(csv_path):
+                    os.remove(csv_path)
+            except Exception as e:
+                logger.warning("Failed to delete temp CSV: %s", e)
+                
+    except Exception as e:
+        logger.error("❌ Batch email sending failed: %s", e)
 
 @app.route('/chat')
 @login_required
 def chat_page():
     return render_template('chat.html')
+
+
+@app.route('/upload/status', methods=['GET'])
+@login_required
+def upload_status_batch():
+    raw = (request.args.get('filenames') or '').strip()
+    if not raw:
+        return jsonify({'items': []})
+
+    filenames = [f.strip() for f in raw.split(',') if f.strip()]
+    payload = []
+    for filename in filenames[:200]:
+        row = get_latest_upload_by_filename(filename)
+        if row:
+            payload.append(row)
+    return jsonify({'items': payload})
 
 
 import requests
@@ -1437,7 +1979,8 @@ def history_page():
 
     offset = (page - 1) * per_page
     select_sql = f"""
-        SELECT id, filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_risk_score, resume_risk_flags
+        SELECT id, filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_risk_score, resume_risk_flags,
+               ml_confidence, top_candidates, model_version, processing_status, processing_error
         FROM uploads
         {where_sql}
         ORDER BY uploaded_at DESC
@@ -1471,15 +2014,15 @@ def history_export():
 
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute(f"SELECT id, filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_risk_score, resume_risk_flags FROM uploads {where_sql} ORDER BY uploaded_at DESC", params)
+    c.execute(f"SELECT id, filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_risk_score, resume_risk_flags, ml_confidence, top_candidates, model_version, processing_status, processing_error FROM uploads {where_sql} ORDER BY uploaded_at DESC", params)
     rows = c.fetchall()
     conn.close()
 
     si = StringIO()
     writer = csv.writer(si)
-    writer.writerow(['id','filename','saved_path','category','uploader_email','uploaded_at','summary','resume_score','resume_risk_score','resume_risk_flags'])
+    writer.writerow(['id','filename','saved_path','category','uploader_email','uploaded_at','summary','resume_score','resume_risk_score','resume_risk_flags','ml_confidence','top_candidates','model_version','processing_status','processing_error'])
     for r in rows:
-        writer.writerow([r[0], r[1], r[2] or '', r[4] or '', r[5] or '', r[6] or '', r[3] or '', r[7] or '', r[8] or '', r[9] or ''])
+        writer.writerow([r[0], r[1], r[2] or '', r[4] or '', r[5] or '', r[6] or '', r[3] or '', r[7] or '', r[8] or '', r[9] or '', r[10] or '', r[11] or '', r[12] or '', r[13] or '', r[14] or ''])
     output = si.getvalue()
     si.close()
     resp = Response(output, mimetype='text/csv')
@@ -1601,6 +2144,8 @@ def admin_dashboard():
         total_admins = c.fetchone()[0]
         c.execute('SELECT COUNT(*) FROM users WHERE is_active = 1')
         active_users = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM uploads WHERE processing_status IN ('review_required', 'failed')")
+        review_queue_count = c.fetchone()[0]
     finally:
         conn.close()
 
@@ -1610,6 +2155,7 @@ def admin_dashboard():
         total_users=total_users,
         total_admins=total_admins,
         active_users=active_users,
+        review_queue_count=review_queue_count,
         runtime=runtime,
     )
 
@@ -1741,9 +2287,18 @@ def admin_settings():
         'RESUME_PREFERRED_SKILLS': runtime.get('resume_preferred_skills') or '',
         'RESUME_CERTIFICATE_BONUS': str(runtime.get('resume_certificate_bonus') or '10'),
         'RESUME_PROJECT_BONUS': str(runtime.get('resume_project_bonus') or '10'),
+        'AUTO_ROUTE_CONFIDENCE_THRESHOLD': str(runtime.get('auto_route_confidence_threshold') or AUTO_ROUTE_CONFIDENCE_THRESHOLD),
+        'AUTO_ROUTE_THRESHOLD_INVOICE': str(runtime.get('auto_route_threshold_invoice') or ''),
+        'AUTO_ROUTE_THRESHOLD_PAYSLIP': str(runtime.get('auto_route_threshold_payslip') or ''),
+        'AUTO_ROUTE_THRESHOLD_PURCHASE_ORDER': str(runtime.get('auto_route_threshold_purchase_order') or ''),
+        'AUTO_ROUTE_THRESHOLD_MINUTES': str(runtime.get('auto_route_threshold_minutes') or ''),
+        'AUTO_ROUTE_THRESHOLD_RESUME': str(runtime.get('auto_route_threshold_resume') or ''),
+        'AUTO_ROUTE_THRESHOLD_OTHER': str(runtime.get('auto_route_threshold_other') or ''),
+        'INBOUND_ADAPTER': (runtime.get('inbound_adapter') or INBOUND_ADAPTER).lower(),
     }
     has_email_pass = bool(runtime.get('email_pass'))
     has_imap_pass = bool(runtime.get('imap_pass'))
+    has_webhook_secret = bool(runtime.get('webhook_shared_secret'))
 
     if request.method == 'POST':
         form = request.form
@@ -1753,10 +2308,20 @@ def admin_settings():
 
         if not (1 <= smtp_port <= 65535):
             flash('SMTP port must be between 1 and 65535.', 'error')
-            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
         if not (1 <= imap_port <= 65535):
             flash('IMAP port must be between 1 and 65535.', 'error')
-            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
+
+        auto_threshold = _safe_float(form.get('AUTO_ROUTE_CONFIDENCE_THRESHOLD', '').strip(), -1)
+        if not (0.0 <= auto_threshold <= 1.0):
+            flash('Auto-route confidence threshold must be between 0.0 and 1.0.', 'error')
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
+
+        inbound_adapter = (form.get('INBOUND_ADAPTER') or '').strip().lower()
+        if inbound_adapter not in {'imap', 'webhook', 'hybrid'}:
+            flash('Inbound adapter must be one of: imap, webhook, hybrid.', 'error')
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
 
         email_user = (form.get('EMAIL_USER') or '').strip()
         imap_user = (form.get('IMAP_USER') or '').strip()
@@ -1782,7 +2347,7 @@ def admin_settings():
         for field_name, value in email_fields:
             if value and not _is_valid_email(value):
                 flash(f'Invalid email format for {field_name}.', 'error')
-                return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+                return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
 
         updates = {
             'email_user': email_user,
@@ -1815,7 +2380,33 @@ def admin_settings():
             'resume_preferred_skills': (form.get('RESUME_PREFERRED_SKILLS') or '').strip(),
             'resume_certificate_bonus': str(_safe_int(form.get('RESUME_CERTIFICATE_BONUS'), 10)),
             'resume_project_bonus': str(_safe_int(form.get('RESUME_PROJECT_BONUS'), 10)),
+            'auto_route_confidence_threshold': str(auto_threshold),
+            'auto_route_threshold_invoice': (form.get('AUTO_ROUTE_THRESHOLD_INVOICE') or '').strip(),
+            'auto_route_threshold_payslip': (form.get('AUTO_ROUTE_THRESHOLD_PAYSLIP') or '').strip(),
+            'auto_route_threshold_purchase_order': (form.get('AUTO_ROUTE_THRESHOLD_PURCHASE_ORDER') or '').strip(),
+            'auto_route_threshold_minutes': (form.get('AUTO_ROUTE_THRESHOLD_MINUTES') or '').strip(),
+            'auto_route_threshold_resume': (form.get('AUTO_ROUTE_THRESHOLD_RESUME') or '').strip(),
+            'auto_route_threshold_other': (form.get('AUTO_ROUTE_THRESHOLD_OTHER') or '').strip(),
+            'inbound_adapter': inbound_adapter,
         }
+
+        threshold_keys = [
+            'auto_route_threshold_invoice',
+            'auto_route_threshold_payslip',
+            'auto_route_threshold_purchase_order',
+            'auto_route_threshold_minutes',
+            'auto_route_threshold_resume',
+            'auto_route_threshold_other',
+        ]
+        for key in threshold_keys:
+            raw = updates.get(key)
+            if raw == '':
+                continue
+            value = _safe_float(raw, -1)
+            if not (0.0 <= value <= 1.0):
+                flash(f'{key} must be between 0.0 and 1.0 or left blank.', 'error')
+                return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
+            updates[key] = str(value)
 
         path_fields = [
             'upload_folder', 'route_dir_invoice', 'route_dir_payslip',
@@ -1825,7 +2416,7 @@ def admin_settings():
             p = _normalize_dir(updates.get(key))
             if not p:
                 flash(f'{key} is required.', 'error')
-                return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+                return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
             updates[key] = p
 
         try:
@@ -1838,7 +2429,7 @@ def admin_settings():
             os.makedirs(updates['route_dir_resume'], exist_ok=True)
         except Exception as e:
             flash(f'Failed to create one or more configured directories: {e}', 'error')
-            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
 
         email_pass = (form.get('EMAIL_PASS') or '').strip()
         if email_pass:
@@ -1846,13 +2437,16 @@ def admin_settings():
         imap_pass = (form.get('IMAP_PASS') or '').strip()
         if imap_pass:
             updates['imap_pass'] = imap_pass
+        webhook_secret = (form.get('WEBHOOK_SHARED_SECRET') or '').strip()
+        if webhook_secret:
+            updates['webhook_shared_secret'] = webhook_secret
 
         try:
             for key, value in updates.items():
                 set_setting(DATABASE_URL, key, value, encrypt=key in SENSITIVE_SETTING_KEYS)
         except Exception as e:
             flash(f'Failed to save settings: {e}', 'error')
-            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
 
         # Runtime apply for paths and logging.
         app.config['UPLOAD_FOLDER'] = updates['upload_folder']
@@ -1872,7 +2466,278 @@ def admin_settings():
         flash('Settings updated successfully.', 'success')
         return redirect(url_for('admin_settings'))
 
-    return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass)
+    return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
+
+
+@app.route('/admin/review', methods=['GET', 'POST'])
+@admin_required
+def admin_review_queue():
+    if request.method == 'POST':
+        action = (request.form.get('action') or '').strip().lower()
+        selected_ids = [_safe_int(x, -1) for x in request.form.getlist('upload_ids')]
+        selected_ids = [x for x in selected_ids if x > 0]
+        if action in {'bulk_retry', 'bulk_approve', 'bulk_relabel'}:
+            if not selected_ids:
+                flash('Select at least one review item for bulk action.', 'error')
+                return redirect(url_for('admin_review_queue'))
+
+            bulk_action = 'retry' if action == 'bulk_retry' else ('approve' if action == 'bulk_approve' else 'relabel')
+            bulk_category = (request.form.get('bulk_category') or '').strip().lower()
+            if bulk_action in {'approve', 'relabel'} and bulk_category not in CLASSIFICATION_CATEGORIES:
+                flash('Choose a valid category for bulk approve/relabel.', 'error')
+                return redirect(url_for('admin_review_queue'))
+
+            processed = 0
+            for rid in selected_ids:
+                conn = get_db_conn()
+                try:
+                    c = conn.cursor()
+                    c.execute(
+                        '''SELECT id, filename, saved_path, summary, category, uploader_email, processing_status
+                           FROM uploads WHERE id = ?''',
+                        (rid,),
+                    )
+                    row = c.fetchone()
+                finally:
+                    conn.close()
+                if not row:
+                    continue
+
+                _, filename, saved_path, summary, current_category, uploader_email, current_status = row
+                runtime = get_runtime_settings()
+
+                if bulk_action == 'retry':
+                    update_upload_record(rid, processing_status='queued', processing_error=None)
+                    thread = threading.Thread(
+                        target=process_document_in_background,
+                        args=(saved_path, filename, uploader_email, rid),
+                        daemon=True,
+                    )
+                    thread.start()
+                    audit_log('review_retry', f'upload_id={rid}, filename={filename}, bulk=1')
+                    processed += 1
+                    continue
+
+                resume_score = None
+                resume_rank_note = None
+                resume_risk_score = None
+                resume_risk_flags = None
+                if bulk_category == 'resume' and saved_path and os.path.exists(saved_path):
+                    text = extract_text(saved_path, enable_ocr=ENABLE_OCR)
+                    prefs = parse_resume_preferences(runtime)
+                    resume_score, resume_rank_note = score_resume(text, prefs)
+                    resume_risk_score, resume_risk_flags = assess_resume_risk(text)
+
+                update_upload_record(
+                    rid,
+                    category=bulk_category,
+                    resume_score=resume_score,
+                    resume_rank_note=resume_rank_note,
+                    resume_risk_score=resume_risk_score,
+                    resume_risk_flags=', '.join(resume_risk_flags or []) if isinstance(resume_risk_flags, list) else resume_risk_flags,
+                    processing_status='completed',
+                    processing_error=None,
+                )
+
+                if runtime.get('route_local_enabled') and saved_path and os.path.exists(saved_path):
+                    route_dir = get_route_output_dir(bulk_category, runtime)
+                    if route_dir:
+                        try:
+                            os.makedirs(route_dir, exist_ok=True)
+                            shutil.copy2(saved_path, os.path.join(route_dir, os.path.basename(saved_path)))
+                        except Exception as e:
+                            logger.warning('Bulk manual routing copy failed for upload_id=%s: %s', rid, e)
+
+                if runtime.get('route_email_enabled') and saved_path and os.path.exists(saved_path):
+                    recipient = route_for_category(bulk_category)
+                    if recipient:
+                        subj = f"[Bulk Manual Review Approved] {filename} ({bulk_category})"
+                        body = (
+                            f"The document '{filename}' was approved from review queue.\n"
+                            f"Category: {bulk_category}\n"
+                            f"Summary: {summary or 'N/A'}"
+                        )
+                        try:
+                            send_email_with_attachment(recipient, subj, body, saved_path, os.path.basename(saved_path))
+                        except Exception as e:
+                            logger.warning('Bulk manual routing email failed for upload_id=%s: %s', rid, e)
+
+                audit_log(
+                    'review_approved' if bulk_action == 'approve' else 'review_relabel',
+                    f'upload_id={rid}, from={current_category}, to={bulk_category}, previous_status={current_status}, bulk=1',
+                )
+                processed += 1
+
+            flash(f'Bulk action completed for {processed} item(s).', 'success')
+            return redirect(url_for('admin_review_queue'))
+
+        upload_id = _safe_int(request.form.get('upload_id', '').strip(), -1)
+        selected_category = (request.form.get('category') or '').strip().lower()
+
+        if upload_id <= 0:
+            flash('Invalid upload id.', 'error')
+            return redirect(url_for('admin_review_queue'))
+
+        conn = get_db_conn()
+        try:
+            c = conn.cursor()
+            c.execute(
+                '''SELECT id, filename, saved_path, summary, category, uploader_email, processing_status
+                   FROM uploads WHERE id = ?''',
+                (upload_id,),
+            )
+            row = c.fetchone()
+        finally:
+            conn.close()
+
+        if not row:
+            flash('Review item not found.', 'error')
+            return redirect(url_for('admin_review_queue'))
+
+        _, filename, saved_path, summary, current_category, uploader_email, current_status = row
+        runtime = get_runtime_settings()
+
+        if action == 'retry':
+            update_upload_record(upload_id, processing_status='queued', processing_error=None)
+            thread = threading.Thread(
+                target=process_document_in_background,
+                args=(saved_path, filename, uploader_email, upload_id),
+                daemon=True,
+            )
+            thread.start()
+            audit_log('review_retry', f'upload_id={upload_id}, filename={filename}')
+            flash('Reprocessing started.', 'success')
+            return redirect(url_for('admin_review_queue'))
+
+        if action not in {'approve', 'relabel'}:
+            flash('Unsupported review action.', 'error')
+            return redirect(url_for('admin_review_queue'))
+
+        if selected_category not in CLASSIFICATION_CATEGORIES:
+            flash('Please choose a valid category.', 'error')
+            return redirect(url_for('admin_review_queue'))
+
+        resume_score = None
+        resume_rank_note = None
+        resume_risk_score = None
+        resume_risk_flags = None
+        if selected_category == 'resume' and saved_path and os.path.exists(saved_path):
+            text = extract_text(saved_path, enable_ocr=ENABLE_OCR)
+            prefs = parse_resume_preferences(runtime)
+            resume_score, resume_rank_note = score_resume(text, prefs)
+            resume_risk_score, resume_risk_flags = assess_resume_risk(text)
+
+        # Apply admin decision and clear review error state.
+        update_upload_record(
+            upload_id,
+            category=selected_category,
+            resume_score=resume_score,
+            resume_rank_note=resume_rank_note,
+            resume_risk_score=resume_risk_score,
+            resume_risk_flags=', '.join(resume_risk_flags or []) if isinstance(resume_risk_flags, list) else resume_risk_flags,
+            processing_status='completed',
+            processing_error=None,
+        )
+
+        # Route to local folder if enabled.
+        if runtime.get('route_local_enabled') and saved_path and os.path.exists(saved_path):
+            route_dir = get_route_output_dir(selected_category, runtime)
+            if route_dir:
+                try:
+                    os.makedirs(route_dir, exist_ok=True)
+                    shutil.copy2(saved_path, os.path.join(route_dir, os.path.basename(saved_path)))
+                except Exception as e:
+                    logger.warning('Manual routing copy failed for upload_id=%s: %s', upload_id, e)
+
+        # Forward manually approved/re-labeled document via email if enabled.
+        if runtime.get('route_email_enabled') and saved_path and os.path.exists(saved_path):
+            recipient = route_for_category(selected_category)
+            if recipient:
+                subj = f"[Manual Review Approved] {filename} ({selected_category})"
+                body = (
+                    f"The document '{filename}' was approved from review queue.\n"
+                    f"Category: {selected_category}\n"
+                    f"Summary: {summary or 'N/A'}"
+                )
+                try:
+                    send_email_with_attachment(recipient, subj, body, saved_path, os.path.basename(saved_path))
+                except Exception as e:
+                    logger.warning('Manual routing email failed for upload_id=%s: %s', upload_id, e)
+
+        audit_log(
+            'review_approved' if action == 'approve' else 'review_relabel',
+            f'upload_id={upload_id}, from={current_category}, to={selected_category}, previous_status={current_status}',
+        )
+        flash('Review decision saved and document routed.', 'success')
+        return redirect(url_for('admin_review_queue'))
+
+    conn = get_db_conn()
+    try:
+        c = conn.cursor()
+        c.execute(
+            '''SELECT id, filename, category, summary, uploader_email, uploaded_at, ml_confidence,
+                      top_candidates, processing_status, processing_error, saved_path
+               FROM uploads
+               WHERE processing_status IN ('review_required', 'failed')
+               ORDER BY uploaded_at DESC
+               LIMIT 300'''
+        )
+        rows = c.fetchall()
+    finally:
+        conn.close()
+
+    return render_template('admin_review.html', rows=rows, categories=CLASSIFICATION_CATEGORIES)
+
+
+@app.route('/admin/logs', methods=['GET'])
+@developer_required
+def admin_logs():
+    runtime = get_runtime_settings()
+    configured_log_path = runtime.get('log_file_path') or LOG_FILE_PATH
+    log_path = _normalize_dir(configured_log_path) or os.path.abspath(configured_log_path)
+
+    requested_lines = _safe_int(request.args.get('lines', '300'), 300)
+    max_lines = min(max(requested_lines, 50), 2000)
+    level = (request.args.get('level') or 'ALL').strip().upper()
+    query_text = (request.args.get('q') or '').strip()
+    query_lower = query_text.lower()
+
+    raw_tail = []
+    entries = []
+    file_exists = os.path.exists(log_path)
+
+    if file_exists:
+        try:
+            with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
+                raw_tail = list(deque(f, maxlen=max_lines))
+        except Exception as e:
+            flash(f'Unable to read log file: {e}', 'error')
+
+    for line in raw_tail:
+        line_text = line.rstrip('\n')
+        line_upper = line_text.upper()
+        if level != 'ALL' and f' {level} ' not in line_upper:
+            continue
+        if query_lower and query_lower not in line_text.lower():
+            continue
+        entries.append(line_text)
+
+    total_errors = sum(1 for line in raw_tail if ' ERROR ' in line.upper())
+    total_warnings = sum(1 for line in raw_tail if ' WARNING ' in line.upper())
+
+    return render_template(
+        'admin_logs.html',
+        log_path=log_path,
+        file_exists=file_exists,
+        entries=entries,
+        lines=max_lines,
+        level=level,
+        q=query_text,
+        total_scanned=len(raw_tail),
+        total_matches=len(entries),
+        total_errors=total_errors,
+        total_warnings=total_warnings,
+    )
 
 # ---------------- IMAP monitoring helpers (non-invasive) ----------------
 # We set a global thread reference when starting IMAP to allow status checks.
@@ -1907,6 +2772,7 @@ def status():
         'ml_model_loaded': bool(_ml_pipeline),
         'smtp_user': bool(runtime.get('email_user')),
         'imap_thread_alive': bool(imap_thread and imap_thread.is_alive()),
+        'inbound_adapter': runtime.get('inbound_adapter'),
         'settings_updated_at': get_settings_updated_at(DATABASE_URL),
         'upload_folder': runtime.get('upload_folder'),
         'database_backend': 'postgresql',
@@ -1925,18 +2791,22 @@ if __name__ == '__main__':
 
     setup_logging(runtime.get('log_file_path'), runtime.get('log_level'))
 
-    # Start IMAP fetcher thread when running app directly if imap_fetcher exists
-    try:
-        from imap_fetcher import poll_imap_loop
-        def start_imap_thread():
-            global imap_thread
-            t = threading.Thread(target=poll_imap_loop, name="imap-fetcher-thread", daemon=True)
-            t.start()
-            imap_thread = t
-            print(">>> IMAP fetcher thread started (daemon).")
-        start_imap_thread()
-    except Exception as _e:
-        print("IMAP fetcher not started:", _e)
+    # Start IMAP fetcher only when adapter mode includes IMAP.
+    inbound_adapter = (runtime.get('inbound_adapter') or INBOUND_ADAPTER).lower()
+    if inbound_adapter in {'imap', 'hybrid'}:
+        try:
+            from imap_fetcher import poll_imap_loop
+            def start_imap_thread():
+                global imap_thread
+                t = threading.Thread(target=poll_imap_loop, name="imap-fetcher-thread", daemon=True)
+                t.start()
+                imap_thread = t
+                print(">>> IMAP fetcher thread started (daemon).")
+            start_imap_thread()
+        except Exception as _e:
+            print("IMAP fetcher not started:", _e)
+    else:
+        print(f">>> IMAP fetcher skipped due to inbound adapter mode: {inbound_adapter}")
 
     host = os.getenv('FLASK_HOST', '0.0.0.0')
     port = int(os.getenv('FLASK_PORT', '5000'))

@@ -144,6 +144,59 @@
           </div>
 
           <hr class="my-4">
+          <h5>Classification Policy</h5>
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label">Global Auto-Route Confidence</label>
+              <input class="form-control" type="number" step="0.01" min="0" max="1" name="AUTO_ROUTE_CONFIDENCE_THRESHOLD" value="{{ values.AUTO_ROUTE_CONFIDENCE_THRESHOLD }}" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Invoice Threshold (optional)</label>
+              <input class="form-control" type="number" step="0.01" min="0" max="1" name="AUTO_ROUTE_THRESHOLD_INVOICE" value="{{ values.AUTO_ROUTE_THRESHOLD_INVOICE }}" placeholder="fallback to global">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Payslip Threshold (optional)</label>
+              <input class="form-control" type="number" step="0.01" min="0" max="1" name="AUTO_ROUTE_THRESHOLD_PAYSLIP" value="{{ values.AUTO_ROUTE_THRESHOLD_PAYSLIP }}" placeholder="fallback to global">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Purchase Order Threshold (optional)</label>
+              <input class="form-control" type="number" step="0.01" min="0" max="1" name="AUTO_ROUTE_THRESHOLD_PURCHASE_ORDER" value="{{ values.AUTO_ROUTE_THRESHOLD_PURCHASE_ORDER }}" placeholder="fallback to global">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Minutes Threshold (optional)</label>
+              <input class="form-control" type="number" step="0.01" min="0" max="1" name="AUTO_ROUTE_THRESHOLD_MINUTES" value="{{ values.AUTO_ROUTE_THRESHOLD_MINUTES }}" placeholder="fallback to global">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Resume Threshold (optional)</label>
+              <input class="form-control" type="number" step="0.01" min="0" max="1" name="AUTO_ROUTE_THRESHOLD_RESUME" value="{{ values.AUTO_ROUTE_THRESHOLD_RESUME }}" placeholder="fallback to global">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Other Threshold (optional)</label>
+              <input class="form-control" type="number" step="0.01" min="0" max="1" name="AUTO_ROUTE_THRESHOLD_OTHER" value="{{ values.AUTO_ROUTE_THRESHOLD_OTHER }}" placeholder="fallback to global">
+            </div>
+          </div>
+
+          <hr class="my-4">
+          <h5>Inbound Adapter (IMAP Alternative)</h5>
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label">Inbound Adapter Mode</label>
+              <select class="form-select" name="INBOUND_ADAPTER">
+                <option value="imap" {% if values.INBOUND_ADAPTER == 'imap' %}selected{% endif %}>imap (legacy polling)</option>
+                <option value="webhook" {% if values.INBOUND_ADAPTER == 'webhook' %}selected{% endif %}>webhook (professional/event-driven)</option>
+                <option value="hybrid" {% if values.INBOUND_ADAPTER == 'hybrid' %}selected{% endif %}>hybrid (imap + webhook)</option>
+              </select>
+            </div>
+            <div class="col-md-8">
+              <label class="form-label">Webhook Shared Secret</label>
+              <input class="form-control" type="password" name="WEBHOOK_SHARED_SECRET" placeholder="{% if has_webhook_secret %}Saved. Leave blank to keep unchanged{% else %}Set secret for /ingest/webhook/email{% endif %}">
+            </div>
+            <div class="col-md-12">
+              <div class="small text-muted">Webhook endpoint: <code>/ingest/webhook/email</code> with header <code>X-Webhook-Secret</code>. Use webhook or hybrid mode to enable it.</div>
+            </div>
+          </div>
+
+          <hr class="my-4">
           <h5>Logging</h5>
           <div class="row g-3">
             <div class="col-md-8">

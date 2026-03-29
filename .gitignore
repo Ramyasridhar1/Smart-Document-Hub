@@ -6,6 +6,8 @@ uploads/
 .venv
 .env.local
 .env.*.local
+logs/
+*.log
 
 # Docker artifacts
 docker-compose.override.yml

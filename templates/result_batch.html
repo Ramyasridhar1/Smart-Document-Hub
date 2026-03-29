@@ -67,6 +67,8 @@
             <tr>
                 <th>Filename</th>
                 <th>Category</th>
+                <th>Status</th>
+                <th>Confidence</th>
                 <th>Summary</th>
                 <th>Resume Score</th>
                 <th>Risk Score</th>
@@ -77,10 +79,12 @@
         </thead>
         <tbody>
             {% for r in results %}
-            <tr>
+            <tr data-filename="{{ r.filename }}">
                 <td>{{ r.filename }}</td>
                 <td>{{ r.category or 'N/A' }}</td>
-                <td style="max-width:400px; white-space:pre-wrap;">{{ r.summary }}</td>
+                <td class="status-cell">{{ r.processing_status or 'queued' }}</td>
+                <td class="confidence-cell">{% if r.ml_confidence is not none %}{{ '%.2f'|format(r.ml_confidence) }}{% else %}-{% endif %}</td>
+                <td class="summary-cell" style="max-width:400px; white-space:pre-wrap;">{{ r.summary }}</td>
                 <td>{% if r.category == 'resume' %}{{ r.resume_score if r.resume_score is not none else '-' }}{% else %}-{% endif %}</td>
                 <td>{% if r.category == 'resume' %}{{ r.resume_risk_score if r.resume_risk_score is not none else '-' }}{% else %}-{% endif %}</td>
                 <td style="max-width:220px; white-space:pre-wrap;">{% if r.category == 'resume' %}{{ (r.resume_risk_flags or [])|join(', ') if r.resume_risk_flags is iterable and r.resume_risk_flags is not string else (r.resume_risk_flags or '-') }}{% else %}-{% endif %}</td>
@@ -99,9 +103,48 @@
     {% endif %}
 
     <div class="footer">
-        <p>✅ All files processed successfully — Smart Document Hub</p>
+        <p>Files are queued immediately; detailed status, confidence and errors appear in History.</p>
         <a class="button" href="/">← Back to Dashboard</a>
+        <a class="button" href="/history" style="margin-left:8px;">View Live Status</a>
     </div>
 
 </body>
+<script>
+    (function () {
+        const rows = Array.from(document.querySelectorAll('tr[data-filename]'));
+        if (!rows.length) return;
+        const filenames = rows.map(r => r.getAttribute('data-filename')).filter(Boolean);
+        if (!filenames.length) return;
+
+        function updateTable(items) {
+            const map = new Map(items.map(it => [it.filename, it]));
+            rows.forEach(row => {
+                const filename = row.getAttribute('data-filename');
+                const item = map.get(filename);
+                if (!item) return;
+                const statusCell = row.querySelector('.status-cell');
+                const confCell = row.querySelector('.confidence-cell');
+                const summaryCell = row.querySelector('.summary-cell');
+                if (statusCell) statusCell.textContent = item.processing_status || '-';
+                if (confCell) confCell.textContent = (item.ml_confidence === null || item.ml_confidence === undefined) ? '-' : Number(item.ml_confidence).toFixed(2);
+                if (summaryCell) summaryCell.textContent = item.summary || (item.processing_error || '-');
+            });
+        }
+
+        async function poll() {
+            try {
+                const qs = encodeURIComponent(filenames.join(','));
+                const res = await fetch(`/upload/status?filenames=${qs}`, { credentials: 'same-origin' });
+                if (!res.ok) return;
+                const data = await res.json();
+                updateTable(data.items || []);
+            } catch (e) {
+                console.warn('status polling failed', e);
+            }
+        }
+
+        poll();
+        setInterval(poll, 3000);
+    })();
+</script>
 </html>

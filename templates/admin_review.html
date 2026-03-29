@@ -1,0 +1,111 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="app-card p-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h3 class="mb-0">Review Queue</h3>
+    <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary">Back to Admin</a>
+  </div>
+  <p class="text-muted-app">Low-confidence and failed documents appear here for admin triage.</p>
+
+  {% if rows %}
+  <form method="post" id="bulk-form" class="row g-2 align-items-end mb-3">
+    <div class="col-md-4">
+      <label class="form-label">Bulk Category (for approve/relabel)</label>
+      <select class="form-select form-select-sm" name="bulk_category">
+        <option value="">Select category...</option>
+        {% for c in categories %}
+          <option value="{{ c }}">{{ c }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-md-8 d-flex gap-2">
+      <button type="submit" name="action" value="bulk_retry" class="btn btn-sm btn-outline-primary">Bulk Retry Selected</button>
+      <button type="submit" name="action" value="bulk_approve" class="btn btn-sm btn-success">Bulk Approve Selected</button>
+      <button type="submit" name="action" value="bulk_relabel" class="btn btn-sm btn-warning">Bulk Relabel Selected</button>
+    </div>
+    <div id="bulk-hidden-inputs"></div>
+  </form>
+
+  <div class="table-responsive">
+    <table class="table table-hover align-middle">
+      <thead class="table-warning">
+        <tr>
+          <th><input type="checkbox" id="select-all"></th>
+          <th>ID</th>
+          <th>Filename</th>
+          <th>Status</th>
+          <th>Confidence</th>
+          <th>Top Candidates</th>
+          <th>Current Category</th>
+          <th>Summary</th>
+          <th>Notes/Error</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+        <tr>
+          <td><input type="checkbox" value="{{ row[0] }}" class="select-item"></td>
+          <td>{{ row[0] }}</td>
+          <td>{{ row[1] }}</td>
+          <td><span class="badge bg-secondary">{{ row[8] or '-' }}</span></td>
+          <td>{% if row[6] is not none %}{{ '%.2f'|format(row[6]) }}{% else %}-{% endif %}</td>
+          <td style="max-width:240px; white-space:pre-wrap;">{{ row[7] or '-' }}</td>
+          <td>{{ row[2] or '-' }}</td>
+          <td style="max-width:260px; white-space:pre-wrap;">{{ row[3] or '-' }}</td>
+          <td style="max-width:260px; white-space:pre-wrap;">{{ row[9] or '-' }}</td>
+          <td style="min-width:260px;">
+            <form method="post" class="mb-2">
+              <input type="hidden" name="upload_id" value="{{ row[0] }}">
+              <input type="hidden" name="action" value="retry">
+              <button type="submit" class="btn btn-sm btn-outline-primary w-100">Retry Processing</button>
+            </form>
+
+            <form method="post" class="d-grid gap-2">
+              <input type="hidden" name="upload_id" value="{{ row[0] }}">
+              <div>
+                <select class="form-select form-select-sm" name="category" required>
+                  <option value="">Select category...</option>
+                  {% for c in categories %}
+                  <option value="{{ c }}" {% if row[2] == c %}selected{% endif %}>{{ c }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <button type="submit" name="action" value="approve" class="btn btn-sm btn-success">Approve + Route</button>
+              <button type="submit" name="action" value="relabel" class="btn btn-sm btn-warning">Relabel + Route</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    (function () {
+      const bulkForm = document.getElementById('bulk-form');
+      const hiddenHolder = document.getElementById('bulk-hidden-inputs');
+      const all = document.getElementById('select-all');
+      const items = Array.from(document.querySelectorAll('.select-item'));
+      if (!all || !items.length) return;
+      all.addEventListener('change', () => {
+        items.forEach(i => { i.checked = all.checked; });
+      });
+
+      bulkForm.addEventListener('submit', () => {
+        hiddenHolder.innerHTML = '';
+        items.filter(i => i.checked).forEach(i => {
+          const input = document.createElement('input');
+          input.type = 'hidden';
+          input.name = 'upload_ids';
+          input.value = i.value;
+          hiddenHolder.appendChild(input);
+        });
+      });
+    })();
+  </script>
+  {% else %}
+  <div class="alert alert-light mb-0">Review queue is empty.</div>
+  {% endif %}
+</div>
+{% endblock %}

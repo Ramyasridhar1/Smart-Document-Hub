@@ -10,6 +10,7 @@ from cryptography.fernet import Fernet, InvalidToken
 SENSITIVE_SETTING_KEYS = {
     'email_pass',
     'imap_pass',
+    'webhook_shared_secret',
 }
 
 DEFAULT_SETTING_KEYS = {
@@ -46,6 +47,15 @@ DEFAULT_SETTING_KEYS = {
     'resume_preferred_skills',
     'resume_certificate_bonus',
     'resume_project_bonus',
+    'auto_route_confidence_threshold',
+    'auto_route_threshold_invoice',
+    'auto_route_threshold_payslip',
+    'auto_route_threshold_purchase_order',
+    'auto_route_threshold_minutes',
+    'auto_route_threshold_resume',
+    'auto_route_threshold_other',
+    'inbound_adapter',
+    'webhook_shared_secret',
 }
 
 

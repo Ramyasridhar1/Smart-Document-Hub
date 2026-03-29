@@ -22,6 +22,7 @@
       <option value="purchase_order" {% if category=='purchase_order' %}selected{% endif %}>Purchase Order</option>
       <option value="minutes" {% if category=='minutes' %}selected{% endif %}>Minutes</option>
       <option value="resume" {% if category=='resume' %}selected{% endif %}>Resume</option>
+      <option value="review_required" {% if category=='review_required' %}selected{% endif %}>Review Required</option>
       <option value="other" {% if category=='other' %}selected{% endif %}>Other</option>
     </select>
   </div>
@@ -45,7 +46,11 @@
         <th>Uploaded At</th>
         <th>Resume Score</th>
         <th>Risk Score</th>
+        <th>Status</th>
+        <th>Confidence</th>
+        <th>Model</th>
         <th>Summary</th>
+        <th>Processing Notes</th>
         <th>File</th>
       </tr>
     </thead>
@@ -59,7 +64,11 @@
         <td>{{ row[6][:19].replace('T',' ') if row[6] else '' }}</td>
         <td>{{ row[7] if row[7] is not none else '-' }}</td>
         <td>{{ row[8] if row[8] is not none else '-' }}</td>
+        <td>{{ row[13] or '-' }}</td>
+        <td>{% if row[10] is not none %}{{ '%.2f'|format(row[10]) }}{% else %}-{% endif %}</td>
+        <td>{{ row[12] or '-' }}</td>
         <td style="max-width:320px; white-space:pre-wrap;">{{ row[3] }}</td>
+        <td style="max-width:260px; white-space:pre-wrap;">{{ row[14] or row[11] or '-' }}</td>
         <td>
           <a class="btn btn-sm btn-outline-primary"
              href="/uploads/{{ row[2] | replace('uploads/', '') | replace('\\', '/') }}" target="_blank">
