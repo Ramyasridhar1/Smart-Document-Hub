@@ -11,3 +11,4 @@ logs/
 
 # Docker artifacts
 docker-compose.override.yml
+data/

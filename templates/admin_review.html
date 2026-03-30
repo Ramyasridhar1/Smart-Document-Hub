@@ -3,7 +3,10 @@
 <div class="app-card p-4">
   <div class="d-flex justify-content-between align-items-center mb-3">
     <h3 class="mb-0">Review Queue</h3>
-    <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary">Back to Admin</a>
+    <div class="d-flex gap-2">
+      <a href="{{ url_for('admin_review_export') }}" class="btn btn-outline-primary">Export Feedback CSV</a>
+      <a href="{{ url_for('admin_dashboard') }}" class="btn btn-outline-secondary">Back to Admin</a>
+    </div>
   </div>
   <p class="text-muted-app">Low-confidence and failed documents appear here for admin triage.</p>
 
@@ -22,6 +25,23 @@
       <button type="submit" name="action" value="bulk_retry" class="btn btn-sm btn-outline-primary">Bulk Retry Selected</button>
       <button type="submit" name="action" value="bulk_approve" class="btn btn-sm btn-success">Bulk Approve Selected</button>
       <button type="submit" name="action" value="bulk_relabel" class="btn btn-sm btn-warning">Bulk Relabel Selected</button>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Bulk Shortlist Feedback (resume)</label>
+      <select class="form-select form-select-sm" name="bulk_shortlist_fit">
+        <option value="">none</option>
+        <option value="shortlist">shortlist</option>
+        <option value="reject">reject</option>
+        <option value="unsure">unsure</option>
+      </select>
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Bulk Extraction Feedback</label>
+      <input class="form-control form-control-sm" type="text" name="bulk_extraction_feedback" placeholder="amount/date/vendor missing">
+    </div>
+    <div class="col-md-4">
+      <label class="form-label">Bulk Reviewer Note</label>
+      <input class="form-control form-control-sm" type="text" name="bulk_reviewer_note" placeholder="optional note">
     </div>
     <div id="bulk-hidden-inputs"></div>
   </form>
@@ -70,6 +90,20 @@
                   <option value="{{ c }}" {% if row[2] == c %}selected{% endif %}>{{ c }}</option>
                   {% endfor %}
                 </select>
+              </div>
+              <div>
+                <select class="form-select form-select-sm" name="shortlist_fit">
+                  <option value="">Shortlist feedback (optional)</option>
+                  <option value="shortlist">shortlist</option>
+                  <option value="reject">reject</option>
+                  <option value="unsure">unsure</option>
+                </select>
+              </div>
+              <div>
+                <input class="form-control form-control-sm" type="text" name="extraction_feedback" placeholder="Extraction issue (optional)">
+              </div>
+              <div>
+                <input class="form-control form-control-sm" type="text" name="reviewer_note" placeholder="Reviewer note (optional)">
               </div>
               <button type="submit" name="action" value="approve" class="btn btn-sm btn-success">Approve + Route</button>
               <button type="submit" name="action" value="relabel" class="btn btn-sm btn-warning">Relabel + Route</button>

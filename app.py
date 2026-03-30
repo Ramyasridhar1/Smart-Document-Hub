@@ -21,7 +21,7 @@ import pdfplumber
 import docx
 from pdf2image import convert_from_path
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageOps, ImageFilter
 import joblib
 from math import ceil
 import csv
@@ -42,6 +42,12 @@ from settings_store import (
 )
 
 
+# ---------------------------------
+# LOAD ENVIRONMENT
+# ---------------------------------
+load_dotenv()
+
+
 # -----------------------------------------------------
 
 # === NLTK local data bootstrap ===
@@ -54,27 +60,33 @@ except OSError:
 # =====================================================
 
 # ---------------- ML model loader -------------------
-MODEL_PATH = os.path.join("model", "tfidf_logreg.joblib")
-_ml_pipeline = None
-MODEL_VERSION = 'unavailable'
-try:
-    if os.path.exists(MODEL_PATH):
-        _ml_pipeline = joblib.load(MODEL_PATH)
-        MODEL_VERSION = datetime.utcfromtimestamp(os.path.getmtime(MODEL_PATH)).strftime('%Y%m%d%H%M%S')
-        print(">>> ML classifier loaded from:", MODEL_PATH)
-    else:
-        print(">>> ML model not found at", MODEL_PATH)
-except Exception as e:
-    _ml_pipeline = None
-    print(">>> Failed to load ML model:", e)
+CLASSIFIER_MODEL_PATH = os.getenv('CLASSIFIER_MODEL_PATH', os.path.join("model", "tfidf_logreg.joblib"))
+RESUME_RANKER_MODEL_PATH = os.getenv('RESUME_RANKER_MODEL_PATH', os.path.join("model", "resume_ranker.joblib"))
+
+
+def _load_joblib_model(path, label):
+    if not os.path.exists(path):
+        print(f">>> {label} model not found at", path)
+        return None, 'unavailable'
+    try:
+        model = joblib.load(path)
+        version = datetime.utcfromtimestamp(os.path.getmtime(path)).strftime('%Y%m%d%H%M%S')
+        print(f">>> {label} model loaded from:", path)
+        return model, version
+    except Exception as exc:
+        print(f">>> Failed to load {label} model:", exc)
+        return None, 'unavailable'
+
+
+_ml_pipeline, CLASSIFIER_MODEL_VERSION = _load_joblib_model(CLASSIFIER_MODEL_PATH, 'classifier')
+_ml_resume_ranker, RESUME_RANKER_MODEL_VERSION = _load_joblib_model(RESUME_RANKER_MODEL_PATH, 'resume ranker')
+# Backward-compatible alias used by existing DB/audit fields.
+MODEL_VERSION = CLASSIFIER_MODEL_VERSION
 # ----------------------------------------------------
 
 # ---------------------------------
-# LOAD ENVIRONMENT AND CONFIG
+# APP CONFIG
 # ---------------------------------
-load_dotenv()
-
-
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc')
 # Backward-compatible alias used by existing helper calls.
@@ -91,6 +103,12 @@ EXTRACT_PDF_MAX_PAGES = int(os.getenv('EXTRACT_PDF_MAX_PAGES', '10'))  # Only re
 AUTO_ROUTE_CONFIDENCE_THRESHOLD = float(os.getenv('AUTO_ROUTE_CONFIDENCE_THRESHOLD', '0.75'))
 INBOUND_ADAPTER = (os.getenv('INBOUND_ADAPTER', 'hybrid') or 'hybrid').strip().lower()
 WEBHOOK_SHARED_SECRET = os.getenv('WEBHOOK_SHARED_SECRET', '')
+ENABLE_RESUME_RANKER = str(os.getenv('ENABLE_RESUME_RANKER', '0')).strip().lower() in {'1', 'true', 'yes', 'on'}
+try:
+    RANKER_MIN_FIT_SCORE = float(os.getenv('RANKER_MIN_FIT_SCORE', '60'))
+except Exception:
+    RANKER_MIN_FIT_SCORE = 60.0
+RANKER_MIN_FIT_SCORE = max(0.0, min(100.0, RANKER_MIN_FIT_SCORE))
 
 EMAIL_USER = os.getenv('EMAIL_USER')
 EMAIL_PASS = os.getenv('EMAIL_PASS')
@@ -372,6 +390,10 @@ def get_runtime_settings():
         'auto_route_threshold_other': os.getenv('AUTO_ROUTE_THRESHOLD_OTHER', ''),
         'inbound_adapter': os.getenv('INBOUND_ADAPTER', INBOUND_ADAPTER),
         'webhook_shared_secret': os.getenv('WEBHOOK_SHARED_SECRET', WEBHOOK_SHARED_SECRET),
+        'enable_resume_ranker': os.getenv('ENABLE_RESUME_RANKER', '0'),
+        'ranker_min_fit_score': os.getenv('RANKER_MIN_FIT_SCORE', '60'),
+        'classifier_model_path': os.getenv('CLASSIFIER_MODEL_PATH', CLASSIFIER_MODEL_PATH),
+        'resume_ranker_model_path': os.getenv('RESUME_RANKER_MODEL_PATH', RESUME_RANKER_MODEL_PATH),
     }
 
     try:
@@ -389,6 +411,8 @@ def get_runtime_settings():
     settings['route_local_enabled'] = _bool_from_str(settings.get('route_local_enabled'), default=True)
     settings['route_email_enabled'] = _bool_from_str(settings.get('route_email_enabled'), default=True)
     settings['inbound_adapter'] = (settings.get('inbound_adapter') or INBOUND_ADAPTER).strip().lower()
+    settings['enable_resume_ranker'] = _bool_from_str(settings.get('enable_resume_ranker'), default=ENABLE_RESUME_RANKER)
+    settings['ranker_min_fit_score'] = max(0.0, min(100.0, _safe_float(settings.get('ranker_min_fit_score'), RANKER_MIN_FIT_SCORE)))
     return settings
 
 
@@ -441,9 +465,13 @@ def init_db(db_url=None):
                     resume_rank_note TEXT,
                     resume_risk_score DOUBLE PRECISION,
                     resume_risk_flags TEXT,
+                    resume_fit_score DOUBLE PRECISION,
+                    resume_fit_confidence DOUBLE PRECISION,
                     ml_confidence DOUBLE PRECISION,
                     top_candidates TEXT,
                     model_version TEXT,
+                    classifier_version TEXT,
+                    ranker_version TEXT,
                     processing_status TEXT,
                     processing_error TEXT
                 )''')
@@ -477,6 +505,18 @@ def init_db(db_url=None):
                     updated_at TEXT,
                     last_login_at TEXT
                 )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS review_feedback (
+                    id BIGSERIAL PRIMARY KEY,
+                    upload_id BIGINT,
+                    admin_action TEXT,
+                    from_category TEXT,
+                    to_category TEXT,
+                    shortlist_fit TEXT,
+                    extraction_feedback TEXT,
+                    reviewer_note TEXT,
+                    actor TEXT,
+                    created_at TEXT
+                )''')
     conn.commit()
 
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS saved_path TEXT")
@@ -484,9 +524,13 @@ def init_db(db_url=None):
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_rank_note TEXT")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_risk_score DOUBLE PRECISION")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_risk_flags TEXT")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_fit_score DOUBLE PRECISION")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS resume_fit_confidence DOUBLE PRECISION")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS ml_confidence DOUBLE PRECISION")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS top_candidates TEXT")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS model_version TEXT")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS classifier_version TEXT")
+    c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS ranker_version TEXT")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS processing_status TEXT")
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS processing_error TEXT")
     conn.commit()
@@ -529,6 +573,10 @@ def init_db(db_url=None):
         'auto_route_threshold_resume': os.getenv('AUTO_ROUTE_THRESHOLD_RESUME', ''),
         'auto_route_threshold_other': os.getenv('AUTO_ROUTE_THRESHOLD_OTHER', ''),
         'inbound_adapter': os.getenv('INBOUND_ADAPTER', INBOUND_ADAPTER),
+        'enable_resume_ranker': os.getenv('ENABLE_RESUME_RANKER', '0'),
+        'ranker_min_fit_score': os.getenv('RANKER_MIN_FIT_SCORE', '60'),
+        'classifier_model_path': os.getenv('CLASSIFIER_MODEL_PATH', CLASSIFIER_MODEL_PATH),
+        'resume_ranker_model_path': os.getenv('RESUME_RANKER_MODEL_PATH', RESUME_RANKER_MODEL_PATH),
     }
     for key, value in defaults.items():
         c.execute('SELECT 1 FROM settings WHERE key = ?', (key,))
@@ -728,6 +776,46 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
 
     ext = file_path.rsplit('.', 1)[-1].lower()
 
+    def _prepare_image_for_ocr(img):
+        try:
+            processed = ImageOps.exif_transpose(img)
+            processed = processed.convert('L')
+            # Upscale small images to improve OCR legibility on scanned docs.
+            if processed.width < 1400:
+                scale = max(1, int(1400 / max(1, processed.width)))
+                if scale > 1:
+                    processed = processed.resize((processed.width * scale, processed.height * scale), Image.Resampling.LANCZOS)
+            processed = ImageOps.autocontrast(processed)
+            processed = processed.filter(ImageFilter.MedianFilter(size=3))
+            return processed
+        except Exception:
+            return img
+
+    def _ocr_with_fallback(img, timeout=10):
+        try:
+            prepared = _prepare_image_for_ocr(img)
+            binarized = prepared.point(lambda p: 255 if p > 175 else 0)
+            variants = [prepared, binarized, img]
+            configs = [
+                '--oem 3 --psm 6',
+                '--oem 3 --psm 11',
+                '--oem 1 --psm 4',
+            ]
+            best = ''
+            for variant in variants:
+                for cfg in configs:
+                    try:
+                        out = pytesseract.image_to_string(variant, timeout=timeout, config=cfg)
+                    except TypeError:
+                        out = pytesseract.image_to_string(variant, config=cfg)
+                    except Exception:
+                        continue
+                    if out and len(out.strip()) > len(best.strip()):
+                        best = out
+            return best
+        except Exception:
+            return ''
+
     try:
         if ext == 'txt':
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -770,7 +858,7 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
                 if i >= max_pages_for_ocr:
                     break
                 try:
-                    txt = pytesseract.image_to_string(img, timeout=timeout_seconds)
+                    txt = _ocr_with_fallback(img, timeout=timeout_seconds)
                     if txt and txt.strip():
                         ocr_texts.append(txt)
                 except Exception as e:
@@ -784,6 +872,18 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
                 return ("\n".join(paragraphs).strip())[:EXTRACT_MAX_TEXT_BYTES]  # limit to configured max
             except Exception as e:
                 logger.debug("docx error: %s", e)
+                return ""
+
+        if ext in ('png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'webp'):
+            if not enable_ocr:
+                logger.debug("OCR disabled for image file %s", file_path)
+                return ""
+            try:
+                img = Image.open(file_path)
+                text = _ocr_with_fallback(img, timeout=timeout_seconds)
+                return (text or "")[:EXTRACT_MAX_TEXT_BYTES]
+            except Exception as e:
+                logger.debug("image OCR error: %s", e)
                 return ""
 
     except Exception as e:
@@ -882,6 +982,43 @@ def score_resume(text, prefs):
     return round(score, 2), ', '.join(notes) if notes else 'No preference matches detected'
 
 
+def score_resume_with_ranker(text, prefs, runtime):
+    base_score, base_note = score_resume(text, prefs)
+    if not runtime.get('enable_resume_ranker'):
+        return base_score, base_note, None, 'disabled'
+
+    if _ml_resume_ranker is None:
+        return base_score, f"{base_note}; ranker_unavailable", None, RESUME_RANKER_MODEL_VERSION
+
+    try:
+        ranker_score = None
+        ranker_conf = None
+        if hasattr(_ml_resume_ranker, 'predict_proba'):
+            probs = _ml_resume_ranker.predict_proba([text or ""])[0]
+            ranker_conf = float(max(probs)) if len(probs) > 0 else 0.0
+            if len(probs) >= 2:
+                ranker_score = float(probs[1]) * 100.0
+            elif len(probs) == 1:
+                ranker_score = float(probs[0]) * 100.0
+        else:
+            pred = _ml_resume_ranker.predict([text or ""])[0]
+            ranker_score = float(pred)
+            if 0.0 <= ranker_score <= 1.0:
+                ranker_score *= 100.0
+            ranker_conf = 0.6
+
+        if ranker_score is None:
+            return base_score, f"{base_note}; ranker_no_score", ranker_conf, RESUME_RANKER_MODEL_VERSION
+
+        ranker_score = max(0.0, min(100.0, ranker_score))
+        blended = round((0.7 * base_score) + (0.3 * ranker_score), 2)
+        note = f"{base_note}; ranker:{ranker_score:.1f}"
+        return blended, note, ranker_conf, RESUME_RANKER_MODEL_VERSION
+    except Exception as exc:
+        logger.warning('Resume ranker fallback to rule-based score: %s', exc)
+        return base_score, f"{base_note}; ranker_error", None, RESUME_RANKER_MODEL_VERSION
+
+
 def assess_resume_risk(text):
     t = (text or '').lower()
     risk = 0.0
@@ -911,11 +1048,11 @@ def assess_resume_risk(text):
     return min(100.0, round(risk, 2)), flags
 
 
-def log_upload(filename, saved_path, summary, category, uploader_email=None, resume_score=None, resume_rank_note=None, resume_risk_score=None, resume_risk_flags=None, ml_confidence=None, top_candidates=None, model_version=None, processing_status='completed', processing_error=None):
+def log_upload(filename, saved_path, summary, category, uploader_email=None, resume_score=None, resume_rank_note=None, resume_risk_score=None, resume_risk_flags=None, resume_fit_score=None, resume_fit_confidence=None, ml_confidence=None, top_candidates=None, model_version=None, classifier_version=None, ranker_version=None, processing_status='completed', processing_error=None):
     conn = sqlite3.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute(
-        'INSERT INTO uploads (filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_rank_note, resume_risk_score, resume_risk_flags, ml_confidence, top_candidates, model_version, processing_status, processing_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO uploads (filename, saved_path, summary, category, uploader_email, uploaded_at, resume_score, resume_rank_note, resume_risk_score, resume_risk_flags, resume_fit_score, resume_fit_confidence, ml_confidence, top_candidates, model_version, classifier_version, ranker_version, processing_status, processing_error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         (
             filename,
             saved_path,
@@ -927,9 +1064,13 @@ def log_upload(filename, saved_path, summary, category, uploader_email=None, res
             resume_rank_note,
             resume_risk_score,
             ', '.join(resume_risk_flags or []) if isinstance(resume_risk_flags, list) else resume_risk_flags,
+            resume_fit_score,
+            resume_fit_confidence,
             ml_confidence,
             top_candidates,
             model_version,
+            classifier_version,
+            ranker_version,
             processing_status,
             processing_error,
         )
@@ -942,8 +1083,8 @@ def create_upload_pending(filename, saved_path, uploader_email=None):
     conn = sqlite3.connect(DATABASE_URL)
     c = conn.cursor()
     c.execute(
-        '''INSERT INTO uploads (filename, saved_path, summary, category, uploader_email, uploaded_at, model_version, processing_status)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id''',
+          '''INSERT INTO uploads (filename, saved_path, summary, category, uploader_email, uploaded_at, model_version, classifier_version, ranker_version, processing_status)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id''',
         (
             filename,
             saved_path,
@@ -952,6 +1093,8 @@ def create_upload_pending(filename, saved_path, uploader_email=None):
             uploader_email,
             datetime.utcnow().isoformat(),
             MODEL_VERSION,
+            CLASSIFIER_MODEL_VERSION,
+            RESUME_RANKER_MODEL_VERSION,
             'queued',
         ),
     )
@@ -966,7 +1109,9 @@ def update_upload_record(upload_id, **updates):
         return
     allowed = {
         'summary', 'category', 'resume_score', 'resume_rank_note', 'resume_risk_score', 'resume_risk_flags',
-        'ml_confidence', 'top_candidates', 'model_version', 'processing_status', 'processing_error'
+        'resume_fit_score', 'resume_fit_confidence',
+        'ml_confidence', 'top_candidates', 'model_version', 'classifier_version', 'ranker_version',
+        'processing_status', 'processing_error'
     }
     fields = []
     params = []
@@ -982,6 +1127,36 @@ def update_upload_record(upload_id, **updates):
     c.execute(f"UPDATE uploads SET {', '.join(fields)} WHERE id = ?", params)
     conn.commit()
     conn.close()
+
+
+def record_review_feedback(upload_id, admin_action, from_category, to_category, shortlist_fit=None, extraction_feedback=None, reviewer_note=None):
+    user = get_current_user()
+    actor = user.get('username') if user else 'system'
+    conn = sqlite3.connect(DATABASE_URL)
+    try:
+        c = conn.cursor()
+        c.execute(
+            '''INSERT INTO review_feedback (
+                   upload_id, admin_action, from_category, to_category, shortlist_fit,
+                   extraction_feedback, reviewer_note, actor, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+            (
+                upload_id,
+                admin_action,
+                from_category,
+                to_category,
+                shortlist_fit,
+                extraction_feedback,
+                reviewer_note,
+                actor,
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+    except Exception as e:
+        logger.warning('Review feedback save failed: %s', e)
+    finally:
+        conn.close()
 
 
 def get_latest_upload_by_filename(filename):
@@ -1134,10 +1309,14 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
         resume_rank_note = None
         resume_risk_score = None
         resume_risk_flags = None
+        resume_fit_score = None
+        resume_fit_confidence = None
+        ranker_version = RESUME_RANKER_MODEL_VERSION
         
         if category == 'resume':
             prefs = parse_resume_preferences(runtime)
-            resume_score, resume_rank_note = score_resume(text, prefs)
+            resume_score, resume_rank_note, resume_fit_confidence, ranker_version = score_resume_with_ranker(text, prefs, runtime)
+            resume_fit_score = resume_score
             resume_risk_score, resume_risk_flags = assess_resume_risk(text)
 
         status_value = 'review_required' if requires_review else 'completed'
@@ -1153,9 +1332,13 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
             resume_rank_note=resume_rank_note,
             resume_risk_score=resume_risk_score,
             resume_risk_flags=', '.join(resume_risk_flags or []) if isinstance(resume_risk_flags, list) else resume_risk_flags,
+            resume_fit_score=resume_fit_score,
+            resume_fit_confidence=resume_fit_confidence,
             ml_confidence=confidence,
             top_candidates=top_candidates,
             model_version=MODEL_VERSION,
+            classifier_version=CLASSIFIER_MODEL_VERSION,
+            ranker_version=ranker_version,
             processing_status=status_value,
             processing_error=processing_error,
         )
@@ -2287,6 +2470,10 @@ def admin_settings():
         'RESUME_PREFERRED_SKILLS': runtime.get('resume_preferred_skills') or '',
         'RESUME_CERTIFICATE_BONUS': str(runtime.get('resume_certificate_bonus') or '10'),
         'RESUME_PROJECT_BONUS': str(runtime.get('resume_project_bonus') or '10'),
+        'ENABLE_RESUME_RANKER': '1' if runtime.get('enable_resume_ranker') else '0',
+        'RANKER_MIN_FIT_SCORE': str(runtime.get('ranker_min_fit_score') if runtime.get('ranker_min_fit_score') is not None else RANKER_MIN_FIT_SCORE),
+        'CLASSIFIER_MODEL_PATH': runtime.get('classifier_model_path') or CLASSIFIER_MODEL_PATH,
+        'RESUME_RANKER_MODEL_PATH': runtime.get('resume_ranker_model_path') or RESUME_RANKER_MODEL_PATH,
         'AUTO_ROUTE_CONFIDENCE_THRESHOLD': str(runtime.get('auto_route_confidence_threshold') or AUTO_ROUTE_CONFIDENCE_THRESHOLD),
         'AUTO_ROUTE_THRESHOLD_INVOICE': str(runtime.get('auto_route_threshold_invoice') or ''),
         'AUTO_ROUTE_THRESHOLD_PAYSLIP': str(runtime.get('auto_route_threshold_payslip') or ''),
@@ -2316,6 +2503,11 @@ def admin_settings():
         auto_threshold = _safe_float(form.get('AUTO_ROUTE_CONFIDENCE_THRESHOLD', '').strip(), -1)
         if not (0.0 <= auto_threshold <= 1.0):
             flash('Auto-route confidence threshold must be between 0.0 and 1.0.', 'error')
+            return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
+
+        ranker_min_fit_score = _safe_float(form.get('RANKER_MIN_FIT_SCORE', '').strip(), -1)
+        if not (0.0 <= ranker_min_fit_score <= 100.0):
+            flash('Ranker minimum fit score must be between 0 and 100.', 'error')
             return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
 
         inbound_adapter = (form.get('INBOUND_ADAPTER') or '').strip().lower()
@@ -2380,6 +2572,10 @@ def admin_settings():
             'resume_preferred_skills': (form.get('RESUME_PREFERRED_SKILLS') or '').strip(),
             'resume_certificate_bonus': str(_safe_int(form.get('RESUME_CERTIFICATE_BONUS'), 10)),
             'resume_project_bonus': str(_safe_int(form.get('RESUME_PROJECT_BONUS'), 10)),
+            'enable_resume_ranker': '1' if form.get('ENABLE_RESUME_RANKER') == 'on' else '0',
+            'ranker_min_fit_score': str(ranker_min_fit_score),
+            'classifier_model_path': (form.get('CLASSIFIER_MODEL_PATH') or '').strip() or CLASSIFIER_MODEL_PATH,
+            'resume_ranker_model_path': (form.get('RESUME_RANKER_MODEL_PATH') or '').strip() or RESUME_RANKER_MODEL_PATH,
             'auto_route_confidence_threshold': str(auto_threshold),
             'auto_route_threshold_invoice': (form.get('AUTO_ROUTE_THRESHOLD_INVOICE') or '').strip(),
             'auto_route_threshold_payslip': (form.get('AUTO_ROUTE_THRESHOLD_PAYSLIP') or '').strip(),
@@ -2483,6 +2679,9 @@ def admin_review_queue():
 
             bulk_action = 'retry' if action == 'bulk_retry' else ('approve' if action == 'bulk_approve' else 'relabel')
             bulk_category = (request.form.get('bulk_category') or '').strip().lower()
+            bulk_shortlist_fit = (request.form.get('bulk_shortlist_fit') or '').strip().lower() or None
+            bulk_extraction_feedback = (request.form.get('bulk_extraction_feedback') or '').strip() or None
+            bulk_reviewer_note = (request.form.get('bulk_reviewer_note') or '').strip() or None
             if bulk_action in {'approve', 'relabel'} and bulk_category not in CLASSIFICATION_CATEGORIES:
                 flash('Choose a valid category for bulk approve/relabel.', 'error')
                 return redirect(url_for('admin_review_queue'))
@@ -2566,6 +2765,15 @@ def admin_review_queue():
                     'review_approved' if bulk_action == 'approve' else 'review_relabel',
                     f'upload_id={rid}, from={current_category}, to={bulk_category}, previous_status={current_status}, bulk=1',
                 )
+                record_review_feedback(
+                    rid,
+                    'bulk_approve' if bulk_action == 'approve' else 'bulk_relabel',
+                    current_category,
+                    bulk_category,
+                    shortlist_fit=bulk_shortlist_fit,
+                    extraction_feedback=bulk_extraction_feedback,
+                    reviewer_note=bulk_reviewer_note,
+                )
                 processed += 1
 
             flash(f'Bulk action completed for {processed} item(s).', 'success')
@@ -2573,6 +2781,14 @@ def admin_review_queue():
 
         upload_id = _safe_int(request.form.get('upload_id', '').strip(), -1)
         selected_category = (request.form.get('category') or '').strip().lower()
+        shortlist_fit = (request.form.get('shortlist_fit') or '').strip().lower() or None
+        extraction_feedback = (request.form.get('extraction_feedback') or '').strip() or None
+        reviewer_note = (request.form.get('reviewer_note') or '').strip() or None
+
+        valid_shortlist_fit = {None, 'shortlist', 'reject', 'unsure'}
+        if shortlist_fit not in valid_shortlist_fit:
+            flash('Invalid shortlist feedback value.', 'error')
+            return redirect(url_for('admin_review_queue'))
 
         if upload_id <= 0:
             flash('Invalid upload id.', 'error')
@@ -2668,6 +2884,15 @@ def admin_review_queue():
             'review_approved' if action == 'approve' else 'review_relabel',
             f'upload_id={upload_id}, from={current_category}, to={selected_category}, previous_status={current_status}',
         )
+        record_review_feedback(
+            upload_id,
+            action,
+            current_category,
+            selected_category,
+            shortlist_fit=shortlist_fit,
+            extraction_feedback=extraction_feedback,
+            reviewer_note=reviewer_note,
+        )
         flash('Review decision saved and document routed.', 'success')
         return redirect(url_for('admin_review_queue'))
 
@@ -2687,6 +2912,94 @@ def admin_review_queue():
         conn.close()
 
     return render_template('admin_review.html', rows=rows, categories=CLASSIFICATION_CATEGORIES)
+
+
+@app.route('/admin/review/export', methods=['GET'])
+@admin_required
+def admin_review_export():
+    action = (request.args.get('action') or '').strip().lower()
+    from_category = (request.args.get('from_category') or '').strip().lower()
+    to_category = (request.args.get('to_category') or '').strip().lower()
+    shortlist_fit = (request.args.get('shortlist_fit') or '').strip().lower()
+
+    valid_actions = {'approve', 'relabel', 'bulk_approve', 'bulk_relabel'}
+    valid_shortlist_fit = {'shortlist', 'reject', 'unsure'}
+
+    where_clauses = []
+    params = []
+
+    if action:
+        if action not in valid_actions:
+            flash('Invalid export action filter.', 'error')
+            return redirect(url_for('admin_review_queue'))
+        where_clauses.append('rf.admin_action = ?')
+        params.append(action)
+
+    if from_category:
+        if from_category not in CLASSIFICATION_CATEGORIES and from_category not in {'review_required', 'failed', 'pending'}:
+            flash('Invalid export from-category filter.', 'error')
+            return redirect(url_for('admin_review_queue'))
+        where_clauses.append('LOWER(COALESCE(rf.from_category, \"\")) = ?')
+        params.append(from_category)
+
+    if to_category:
+        if to_category not in CLASSIFICATION_CATEGORIES:
+            flash('Invalid export to-category filter.', 'error')
+            return redirect(url_for('admin_review_queue'))
+        where_clauses.append('LOWER(COALESCE(rf.to_category, \"\")) = ?')
+        params.append(to_category)
+
+    if shortlist_fit:
+        if shortlist_fit not in valid_shortlist_fit:
+            flash('Invalid export shortlist-fit filter.', 'error')
+            return redirect(url_for('admin_review_queue'))
+        where_clauses.append('LOWER(COALESCE(rf.shortlist_fit, \"\")) = ?')
+        params.append(shortlist_fit)
+
+    where_sql = ('WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
+
+    conn = get_db_conn()
+    try:
+        c = conn.cursor()
+        c.execute(
+            f'''
+            SELECT rf.id, rf.upload_id, rf.admin_action, rf.from_category, rf.to_category,
+                   rf.shortlist_fit, rf.extraction_feedback, rf.reviewer_note, rf.actor, rf.created_at,
+                   u.filename, u.uploader_email, u.uploaded_at, u.category, u.ml_confidence, u.top_candidates
+            FROM review_feedback rf
+            LEFT JOIN uploads u ON u.id = rf.upload_id
+            {where_sql}
+            ORDER BY rf.created_at DESC
+            ''',
+            params,
+        )
+        rows = c.fetchall()
+    finally:
+        conn.close()
+
+    si = StringIO()
+    writer = csv.writer(si)
+    writer.writerow([
+        'feedback_id', 'upload_id', 'admin_action', 'from_category', 'to_category',
+        'shortlist_fit', 'extraction_feedback', 'reviewer_note', 'actor', 'feedback_created_at',
+        'filename', 'uploader_email', 'uploaded_at', 'current_upload_category', 'ml_confidence', 'top_candidates'
+    ])
+    for r in rows:
+        writer.writerow([
+            r[0], r[1], r[2] or '', r[3] or '', r[4] or '',
+            r[5] or '', r[6] or '', r[7] or '', r[8] or '', r[9] or '',
+            r[10] or '', r[11] or '', r[12] or '', r[13] or '', r[14] if r[14] is not None else '', r[15] or ''
+        ])
+
+    output = si.getvalue()
+    si.close()
+
+    audit_log('review_feedback_export', f'rows={len(rows)}, action={action or "all"}, from={from_category or "all"}, to={to_category or "all"}, shortlist_fit={shortlist_fit or "all"}')
+
+    timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
+    resp = Response(output, mimetype='text/csv')
+    resp.headers['Content-Disposition'] = f'attachment; filename=review_feedback_{timestamp}.csv'
+    return resp
 
 
 @app.route('/admin/logs', methods=['GET'])

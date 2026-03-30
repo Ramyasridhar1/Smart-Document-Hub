@@ -56,6 +56,10 @@ DEFAULT_SETTING_KEYS = {
     'auto_route_threshold_other',
     'inbound_adapter',
     'webhook_shared_secret',
+    'enable_resume_ranker',
+    'ranker_min_fit_score',
+    'classifier_model_path',
+    'resume_ranker_model_path',
 }
 
 
