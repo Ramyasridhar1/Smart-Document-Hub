@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document Processing Pipeline</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 40px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1200px;
+            background: white;
+            border-radius: 20px;
+            padding: 50px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 50px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            color: #333;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            color: #666;
+        }
+
+        /* Progress Bar */
+        .progress-container {
+            margin-bottom: 50px;
+        }
+
+        .progress-bar {
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #45a049);
+            border-radius: 10px;
+            width: 25%;
+            transition: width 0.6s ease;
+            position: relative;
+        }
+
+        .progress-fill::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+            animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        /* Pipeline Stages */
+        .pipeline {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-bottom: 50px;
+        }
+
+        .stage {
+            position: relative;
+            text-align: center;
+        }
+
+        /* Stage connector line */
+        .stage:not(:last-child)::after {
+            content: '';
+            position: absolute;
+            top: 60px;
+            left: 50%;
+            width: 100%;
+            height: 4px;
+            background: #e0e0e0;
+            transform: translateX(-50%);
+            z-index: 1;
+        }
+
+        .stage.completed:not(:last-child)::after {
+            background: linear-gradient(90deg, #4CAF50, #45a049);
+        }
+
+        .stage.active:not(:last-child)::after {
+            background: linear-gradient(90deg, #4CAF50 0%, #e0e0e0 100%);
+        }
+
+        /* Stage Circle */
+        .stage-circle {
+            width: 120px;
+            height: 120px;
+            margin: 0 auto 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 50px;
+            position: relative;
+            z-index: 2;
+            transition: all 0.4s ease;
+            background: #f0f0f0;
+            color: #999;
+        }
+
+        .stage.completed .stage-circle {
+            background: linear-gradient(135deg, #4CAF50, #45a049);
+            color: white;
+            box-shadow: 0 10px 30px rgba(76, 175, 80, 0.4);
+            transform: scale(1.05);
+        }
+
+        .stage.active .stage-circle {
+            background: linear-gradient(135deg, #2196F3, #1976D2);
+            color: white;
+            box-shadow: 0 10px 30px rgba(33, 150, 243, 0.6);
+            animation: pulse 2s ease-in-out infinite;
+        }
+
+        .stage.pending .stage-circle {
+            background: #e0e0e0;
+            color: #999;
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+
+        .stage-title {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 10px;
+        }
+
+        .stage.pending .stage-title,
+        .stage.pending .stage-description {
+            color: #999;
+        }
+
+        .stage-description {
+            font-size: 0.95em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .stage-status {
+            font-size: 0.85em;
+            font-weight: 600;
+            padding: 6px 12px;
+            border-radius: 20px;
+            display: inline-block;
+            margin-top: 5px;
+            transition: all 0.3s ease;
+        }
+
+        .stage-status.completed {
+            background: #E8F5E9;
+            color: #2E7D32;
+        }
+
+        .stage-status.active {
+            background: #E3F2FD;
+            color: #1565C0;
+            animation: blink 1.5s infinite;
+        }
+
+        .stage-status.pending {
+            background: #F5F5F5;
+            color: #757575;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+
+        /* Success Message */
+        .success-message {
+            background: #F1F8E9;
+            border: 2px solid #4CAF50;
+            border-radius: 12px;
+            padding: 25px;
+            text-align: center;
+            margin-top: 40px;
+            display: none;
+            animation: slideUp 0.5s ease;
+        }
+
+        .success-message.show {
+            display: block;
+        }
+
+        @keyframes slideUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .success-message i {
+            font-size: 2.5em;
+            color: #4CAF50;
+            margin-right: 10px;
+        }
+
+        .success-message p {
+            font-size: 1.2em;
+            color: #2E7D32;
+            font-weight: 600;
+        }
+
+        /* Document Count Display */
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 20px;
+            margin-top: 40px;
+            padding-top: 40px;
+            border-top: 2px solid #e0e0e0;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 20px;
+            background: #f5f5f5;
+            border-radius: 10px;
+            transition: all 0.3s ease;
+        }
+
+        .stat-item:hover {
+            background: #f0f0f0;
+            transform: translateY(-5px);
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: 700;
+            color: #333;
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .container {
+                padding: 30px 20px;
+            }
+
+            .header h1 {
+                font-size: 1.8em;
+            }
+
+            .pipeline {
+                grid-template-columns: repeat(2, 1fr);
+                gap: 30px;
+            }
+
+            .stage:not(:last-child)::after {
+                display: none;
+            }
+
+            .stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        /* Controls */
+        .controls {
+            text-align: center;
+            margin-top: 40px;
+        }
+
+        .btn {
+            padding: 12px 30px;
+            margin: 0 10px;
+            border: none;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-weight: 600;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #f0f0f0;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📊 Document Processing Pipeline</h1>
+            <p>Your documents are being processed through our intelligent pipeline</p>
+        </div>
+
+        <div class="progress-container">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+
+        <div class="pipeline">
+            <!-- Stage 1: Upload -->
+            <div class="stage completed" id="stage1">
+                <div class="stage-circle">
+                    <i class="fas fa-check"></i>
+                </div>
+                <div class="stage-title">Upload</div>
+                <div class="stage-description">Receiving documents</div>
+                <div class="stage-status completed">Completed</div>
+            </div>
+
+            <!-- Stage 2: Extraction -->
+            <div class="stage active" id="stage2">
+                <div class="stage-circle">
+                    <i class="fas fa-bolt"></i>
+                </div>
+                <div class="stage-title">Extraction</div>
+                <div class="stage-description">Extracting content</div>
+                <div class="stage-status active">Processing</div>
+            </div>
+
+            <!-- Stage 3: Classification -->
+            <div class="stage pending" id="stage3">
+                <div class="stage-circle">
+                    <i class="fas fa-bullseye"></i>
+                </div>
+                <div class="stage-title">Classification</div>
+                <div class="stage-description">Analyzing document type</div>
+                <div class="stage-status pending">Pending</div>
+            </div>
+
+            <!-- Stage 4: Routing -->
+            <div class="stage pending" id="stage4">
+                <div class="stage-circle">
+                    <i class="fas fa-arrow-right"></i>
+                </div>
+                <div class="stage-title">Routing</div>
+                <div class="stage-description">Organizing documents</div>
+                <div class="stage-status pending">Pending</div>
+            </div>
+        </div>
+
+        <div class="success-message" id="successMessage">
+            <i class="fas fa-check-circle"></i>
+            <p>All documents have been successfully processed and routed!</p>
+        </div>
+
+        <div class="stats">
+            <div class="stat-item">
+                <div class="stat-label">Documents Uploaded</div>
+                <div class="stat-value" id="uploadCount">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Extracted</div>
+                <div class="stat-value" id="extractCount">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Classified</div>
+                <div class="stat-value" id="classifyCount">0</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">Routed</div>
+                <div class="stat-value" id="routeCount">0</div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <button class="btn btn-primary" onclick="advancePipeline()">Simulate Progress</button>
+            <button class="btn btn-secondary" onclick="completePipeline()">Complete All</button>
+            <button class="btn btn-secondary" onclick="resetPipeline()">Reset</button>
+        </div>
+    </div>
+
+    <script>
+        let currentStage = 1;
+        let documentStats = {
+            uploaded: 15,
+            extracted: 0,
+            classified: 0,
+            routed: 0
+        };
+
+        function updateStats() {
+            document.getElementById('uploadCount').textContent = documentStats.uploaded;
+            document.getElementById('extractCount').textContent = documentStats.extracted;
+            document.getElementById('classifyCount').textContent = documentStats.classified;
+            document.getElementById('routeCount').textContent = documentStats.routed;
+        }
+
+        function updateProgressBar() {
+            const progress = (currentStage / 4) * 100;
+            document.getElementById('progressFill').style.width = progress + '%';
+        }
+
+        function setStageStatus(stageNum, status) {
+            const stage = document.getElementById(`stage${stageNum}`);
+            
+            // Remove all status classes
+            stage.classList.remove('completed', 'active', 'pending');
+            
+            // Add new status class
+            stage.classList.add(status);
+
+            // Update icon and status text
+            const statusDiv = stage.querySelector('.stage-status');
+            const circle = stage.querySelector('.stage-circle');
+
+            if (status === 'completed') {
+                circle.innerHTML = '<i class="fas fa-check"></i>';
+                statusDiv.textContent = 'Completed';
+            } else if (status === 'active') {
+                circle.innerHTML = '<i class="fas fa-spinner"></i>';
+                statusDiv.textContent = 'Processing';
+            } else if (status === 'pending') {
+                circle.innerHTML = getIconForStage(stageNum);
+                statusDiv.textContent = 'Pending';
+            }
+        }
+
+        function getIconForStage(stageNum) {
+            const icons = {
+                1: '<i class="fas fa-upload"></i>',
+                2: '<i class="fas fa-bolt"></i>',
+                3: '<i class="fas fa-bullseye"></i>',
+                4: '<i class="fas fa-arrow-right"></i>'
+            };
+            return icons[stageNum] || '';
+        }
+
+        function advancePipeline() {
+            if (currentStage < 4) {
+                // Mark current stage as completed
+                setStageStatus(currentStage, 'completed');
+                
+                // Update stats based on current stage
+                if (currentStage === 1) documentStats.extracted = documentStats.uploaded;
+                if (currentStage === 2) documentStats.classified = Math.floor(documentStats.uploaded * 0.95);
+                if (currentStage === 3) documentStats.routed = documentStats.classified;
+
+                // Move to next stage
+                currentStage++;
+                
+                if (currentStage <= 4) {
+                    setStageStatus(currentStage, 'active');
+                }
+                
+                updateProgressBar();
+                updateStats();
+            }
+        }
+
+        function completePipeline() {
+            // Complete all stages
+            for (let i = 1; i < 4; i++) {
+                setStageStatus(i, 'completed');
+            }
+            
+            currentStage = 4;
+            setStageStatus(4, 'completed');
+            documentStats.extracted = documentStats.uploaded;
+            documentStats.classified = documentStats.uploaded;
+            documentStats.routed = documentStats.uploaded;
+
+            updateProgressBar();
+            updateStats();
+
+            // Show success message
+            document.getElementById('progressFill').style.width = '100%';
+            setTimeout(() => {
+                document.getElementById('successMessage').classList.add('show');
+            }, 300);
+        }
+
+        function resetPipeline() {
+            currentStage = 2;
+            documentStats = {
+                uploaded: 15,
+                extracted: 0,
+                classified: 0,
+                routed: 0
+            };
+
+            for (let i = 1; i <= 4; i++) {
+                if (i === 1) setStageStatus(i, 'completed');
+                else if (i === 2) setStageStatus(i, 'active');
+                else setStageStatus(i, 'pending');
+            }
+
+            document.getElementById('successMessage').classList.remove('show');
+            updateProgressBar();
+            updateStats();
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', () => {
+            updateStats();
+            updateProgressBar();
+        });
+
+        // Optional: Auto-advance pipeline for demo
+        function autoAdvance() {
+            const stages = [1, 2, 3, 4];
+            let stageIndex = 1;
+
+            setInterval(() => {
+                if (stageIndex < 4) {
+                    advancePipeline();
+                }
+            }, 3000);
+        }
+
+        // Uncomment to enable auto-advance
+        // autoAdvance();
+    </script>
+</body>
+</html>

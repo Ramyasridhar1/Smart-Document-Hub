@@ -1391,6 +1391,13 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/pipeline')
+@login_required
+def pipeline():
+    """Display the document processing pipeline visualization."""
+    return render_template('pipeline.html')
+
+
 @app.route('/upload', methods=['POST'])
 @login_required
 def upload_file():
