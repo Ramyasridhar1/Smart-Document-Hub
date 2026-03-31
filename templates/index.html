@@ -148,8 +148,15 @@
 </style>
 
 <script>
+  let isSubmittingForm = false;
+  
   document.getElementById('uploadForm').addEventListener('submit', async function(e) {
+    if (isSubmittingForm) {
+      return; // Prevent double submission
+    }
+    
     e.preventDefault();
+    isSubmittingForm = true;
     
     // Show pipeline overlay
     document.getElementById('pipelineOverlay').style.display = 'block';
@@ -160,34 +167,11 @@
     const fileCount = fileInput.files.length;
     document.getElementById('uploadCount').textContent = fileCount;
     
-    // Create FormData from form
-    const formData = new FormData(this);
+    // Simulate pipeline progression
+    await simulatePipeline(fileCount);
     
-    try {
-      // Submit form via AJAX
-      const response = await fetch('{{ url_for("upload_file") }}', {
-        method: 'POST',
-        body: formData
-      });
-      
-      if (!response.ok) {
-        // Handle error
-        console.error('Upload failed:', response.status);
-        document.getElementById('pipelineOverlay').style.display = 'none';
-        document.getElementById('uploadSection').style.display = '';
-        return;
-      }
-      
-      // Simulate pipeline progression
-      await simulatePipeline(fileCount);
-      
-      // After pipeline completes, redirect to result
-      window.location.href = response.url;
-    } catch (error) {
-      console.error('Error:', error);
-      document.getElementById('pipelineOverlay').style.display = 'none';
-      document.getElementById('uploadSection').style.display = '';
-    }
+    // After pipeline animation completes, submit the form normally
+    this.submit();
   });
   
   async function simulatePipeline(fileCount) {
