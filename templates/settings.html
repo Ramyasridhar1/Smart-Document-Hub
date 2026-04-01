@@ -209,6 +209,12 @@
             </div>
             <div class="col-md-12">
               <div class="small text-muted">Webhook endpoint: <code>/ingest/webhook/email</code> with header <code>X-Webhook-Secret</code>. Use webhook or hybrid mode to enable it.</div>
+              <div class="small text-muted mt-2">Example multipart request:</div>
+              <pre class="small bg-light border rounded p-2 mt-1 mb-0">curl -X POST https://YOUR_DOMAIN/ingest/webhook/email \
+  -H "X-Webhook-Secret: YOUR_SECRET" \
+  -F "sender=someone@example.com" \
+  -F "file=@/path/to/document.pdf"</pre>
+              <div class="small text-muted mt-2">For Gmail, use an App Password for SMTP/IMAP. Check <code>/imap_status</code> after saving settings to confirm the IMAP poller is alive.</div>
             </div>
           </div>
 

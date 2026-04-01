@@ -1345,11 +1345,10 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
         summary = simple_summarize(text)
         
         update_upload_record(upload_id, processing_status='classifying')
-        category, confidence, top_candidates = classify_document_with_confidence(text)
-        threshold = get_auto_route_threshold(category, runtime)
+        predicted_category, confidence, top_candidates = classify_document_with_confidence(text)
+        threshold = get_auto_route_threshold(predicted_category, runtime)
         requires_review = confidence < threshold
-        if requires_review:
-            category = 'review_required'
+        final_category = predicted_category
         
         resume_score = None
         resume_rank_note = None
@@ -1359,7 +1358,7 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
         resume_fit_confidence = None
         ranker_version = RESUME_RANKER_MODEL_VERSION
         
-        if category == 'resume':
+        if predicted_category == 'resume':
             prefs = parse_resume_preferences(runtime)
             resume_score, resume_rank_note, resume_fit_confidence, ranker_version = score_resume_with_ranker(text, prefs, runtime)
             resume_fit_score = resume_score
@@ -1373,7 +1372,7 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
         update_upload_record(
             upload_id,
             summary=summary,
-            category=category,
+            category=final_category,
             resume_score=resume_score,
             resume_rank_note=resume_rank_note,
             resume_risk_score=resume_risk_score,
@@ -1389,8 +1388,8 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
             processing_error=processing_error,
         )
         
-        if runtime.get('route_local_enabled') and not requires_review:
-            route_dir = get_route_output_dir(category, runtime)
+        if runtime.get('route_local_enabled'):
+            route_dir = get_route_output_dir(predicted_category, runtime)
             if route_dir:
                 try:
                     os.makedirs(route_dir, exist_ok=True)
@@ -1399,14 +1398,14 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
                 except Exception as e:
                     logger.warning('Failed to copy routed file to %s: %s', route_dir, e)
 
-        if runtime.get('route_email_enabled') and not requires_review:
-            recipient = route_for_category(category)
+        if runtime.get('route_email_enabled'):
+            recipient = route_for_category(predicted_category)
             if recipient:
                 from_name = runtime.get('from_name') or FROM_NAME
-                route_subject = f"[{category.title()}] {filename}"
+                route_subject = f"[{predicted_category.title()}] {filename}"
                 route_body = (
                     f"Hello,\n\n"
-                    f"A document has been classified as {category}.\n\n"
+                    f"A document has been classified as {predicted_category}.\n\n"
                     f"Filename: {filename}\n"
                     f"Confidence: {confidence:.2f}\n"
                     f"Summary:\n{summary}\n\n"
@@ -1419,14 +1418,14 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
         
         if uploader_email:
             from_name = runtime.get('from_name') or FROM_NAME
-            reply_subject = f"Receipt: {filename} (classified: {category})"
-            reply_body = f"Hi,\n\nWe processed your file '{filename}'.\nCategory: {category}\nSummary:\n{summary}\n\nThanks,\n{from_name}"
+            reply_subject = f"Receipt: {filename} (classified: {predicted_category})"
+            reply_body = f"Hi,\n\nWe processed your file '{filename}'.\nCategory: {predicted_category}\nSummary:\n{summary}\n\nThanks,\n{from_name}"
             try:
                 send_email_with_attachment(uploader_email, reply_subject, reply_body, None, None)
             except Exception as e:
                 logger.warning("Auto-reply failed for %s: %s", uploader_email, e)
         
-        logger.info("Background processing completed: %s (category=%s)", filename, category)
+        logger.info("Background processing completed: %s (category=%s, review=%s)", filename, predicted_category, requires_review)
         
     except Exception as e:
         update_upload_record(upload_id, processing_status='failed', processing_error=str(e))

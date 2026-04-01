@@ -232,6 +232,13 @@ def extract_text(file_path, ocr_dpi=300, max_pages_for_ocr=30):
     return ""
 
 def classify_document(text):
+    try:
+        from app import classify_document_with_confidence
+        category, _, _ = classify_document_with_confidence(text)
+        return category
+    except Exception:
+        pass
+
     t = (text or "").lower()
     invoice_keywords = ['invoice', 'amount due', 'invoice no', 'bill to', 'total', 'tax', 'gst']
     payslip_keywords = ['payslip', 'salary', 'net pay', 'pay period', 'gross pay']
