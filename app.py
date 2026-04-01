@@ -1504,7 +1504,7 @@ def upload_file():
         
         results.append({
             'filename': saved_filename,
-            'category': quick_category,
+            'category': 'processing',
             'summary': 'Queued for processing...',
             'processing_status': 'queued',
             'ml_confidence': None,

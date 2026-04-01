@@ -12,9 +12,9 @@
             color: #333;
         }
         h1 {
-            color: #333;
+                        <tr data-filename="{{ r.filename }}">
             text-align: center;
-        }
+                                <td class="category-cell">{{ r.category }}</td>
         table {
             width: 95%;
             margin: 20px auto;
@@ -42,6 +42,42 @@
             padding: 6px 10px;
             border-radius: 4px;
             font-size: 13px;
+<script>
+    (function () {
+        const rows = Array.from(document.querySelectorAll('tr[data-filename]'));
+        if (!rows.length) return;
+        const filenames = rows.map(row => row.getAttribute('data-filename')).filter(Boolean);
+        if (!filenames.length) return;
+
+        function updateTable(items) {
+            const map = new Map(items.map(item => [item.filename, item]));
+            rows.forEach(row => {
+                const filename = row.getAttribute('data-filename');
+                const item = map.get(filename);
+                if (!item) return;
+                const categoryCell = row.querySelector('.category-cell');
+                const summaryCell = row.querySelector('td:nth-child(5)');
+                if (categoryCell) categoryCell.textContent = item.category || 'processing';
+                if (summaryCell && item.summary) summaryCell.textContent = item.summary;
+            });
+        }
+
+        async function poll() {
+            try {
+                const qs = encodeURIComponent(filenames.join(','));
+                const res = await fetch(`/upload/status?filenames=${qs}`, { credentials: 'same-origin' });
+                if (!res.ok) return;
+                const data = await res.json();
+                updateTable(data.items || []);
+            } catch (e) {
+                console.warn('status polling failed', e);
+            }
+        }
+
+        poll();
+        setInterval(poll, 3000);
+    })();
+</script>
         }
         a.button:hover {
             background-color: #357ab7;
