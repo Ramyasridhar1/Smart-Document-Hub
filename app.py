@@ -1,4 +1,3 @@
-# ---------------------- IMPORTS ----------------------
 import os
 import base64
 import db_compat as sqlite3
@@ -42,64 +41,50 @@ from settings_store import (
 )
 
 
-# ---------------------------------
-# LOAD ENVIRONMENT
-# ---------------------------------
 load_dotenv()
 
 
-# -----------------------------------------------------
 
-# === NLTK local data bootstrap ===
 try:
     nlp = spacy.load("en_core_web_sm")
-    print("spaCy NLP model loaded successfully")
+    logger.info("spaCy model loaded successfully")
 except OSError:
-    print("WARNING: spaCy model not found")
+    logger.warning("spaCy model not found")
     nlp = None
-# =====================================================
 
-# ---------------- ML model loader -------------------
-CLASSIFIER_MODEL_PATH = os.getenv('CLASSIFIER_MODEL_PATH', os.path.join("model", "tfidf_logreg.joblib"))
+CLASSIFIER_MODEL_PATH = os.getenv('CLASSIFIER_MODEL_PATH', os.path.join("model", "document_classifier_pipeline.pkl"))
 RESUME_RANKER_MODEL_PATH = os.getenv('RESUME_RANKER_MODEL_PATH', os.path.join("model", "resume_ranker.joblib"))
 
 
 def _load_joblib_model(path, label):
     if not os.path.exists(path):
-        print(f">>> {label} model not found at", path)
+        logger.warning("%s model not found: %s", label, path)
         return None, 'unavailable'
     try:
         model = joblib.load(path)
         version = datetime.utcfromtimestamp(os.path.getmtime(path)).strftime('%Y%m%d%H%M%S')
-        print(f">>> {label} model loaded from:", path)
+        logger.info("%s model loaded: %s", label, path)
         return model, version
     except Exception as exc:
-        print(f">>> Failed to load {label} model:", exc)
+        logger.error("Failed to load %s model: %s", label, exc)
         return None, 'unavailable'
 
 
 _ml_pipeline, CLASSIFIER_MODEL_VERSION = _load_joblib_model(CLASSIFIER_MODEL_PATH, 'classifier')
 _ml_resume_ranker, RESUME_RANKER_MODEL_VERSION = _load_joblib_model(RESUME_RANKER_MODEL_PATH, 'resume ranker')
-# Backward-compatible alias used by existing DB/audit fields.
 MODEL_VERSION = CLASSIFIER_MODEL_VERSION
-# ----------------------------------------------------
 
-# ---------------------------------
-# APP CONFIG
-# ---------------------------------
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
-DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://smartdoc:smartdoc@localhost:5432/smartdoc')
-# Backward-compatible alias used by existing helper calls.
+DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/smartdoc')
 DB_PATH = DATABASE_URL
 ALLOWED_EXTENSIONS = {'txt', 'pdf', 'docx', 'doc'}
 CLASSIFICATION_CATEGORIES = ['invoice', 'payslip', 'purchase_order', 'minutes', 'resume', 'other']
 
-# Document extraction & OCR settings
 _enable_ocr_str = os.getenv('ENABLE_OCR', '0').strip().lower() in {'1', 'true', 'yes', 'on'}
-ENABLE_OCR = _enable_ocr_str  # OCR disabled by default (slow)
-OCR_DPI = int(os.getenv('OCR_DPI', '200'))  # Lower DPI = faster OCR
-EXTRACT_MAX_TEXT_BYTES = int(os.getenv('EXTRACT_MAX_TEXT_BYTES', '50000'))  # Limit text size
-EXTRACT_PDF_MAX_PAGES = int(os.getenv('EXTRACT_PDF_MAX_PAGES', '10'))  # Only read first N pages
+ENABLE_OCR = _enable_ocr_str
+OCR_DPI = int(os.getenv('OCR_DPI', '200'))
+EXTRACT_MAX_TEXT_BYTES = int(os.getenv('EXTRACT_MAX_TEXT_BYTES', '50000'))
+EXTRACT_PDF_MAX_PAGES = int(os.getenv('EXTRACT_PDF_MAX_PAGES', '10'))
 AUTO_ROUTE_CONFIDENCE_THRESHOLD = float(os.getenv('AUTO_ROUTE_CONFIDENCE_THRESHOLD', '0.75'))
 INBOUND_ADAPTER = (os.getenv('INBOUND_ADAPTER', 'hybrid') or 'hybrid').strip().lower()
 WEBHOOK_SHARED_SECRET = os.getenv('WEBHOOK_SHARED_SECRET', '')
@@ -134,10 +119,8 @@ DEFAULT_ROUTE_DIRS = {
     'minutes': os.path.join('routed', 'minutes'),
 }
 
-# ----------------- AUTH CONFIG -----------------
 ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
-ADMIN_PASS = os.getenv('ADMIN_PASS', None)
-# -----------------------------------------------
+ADMIN_PASS = os.getenv('ADMIN_PASS', '')
 
 logger = logging.getLogger('smart_document_hub')
 
@@ -174,13 +157,10 @@ def setup_logging(log_file_path=None, log_level=None):
     root_logger.addHandler(file_handler)
     logger.info('Logging configured. file=%s level=%s', target_path, level_name)
 
-# ---------------------------------
-# FLASK APP INIT
-# ---------------------------------
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['DATABASE_URL'] = DATABASE_URL
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200MB
+app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024
 
 SECRET_KEY = os.getenv('FLASK_SECRET_KEY', None) or os.getenv('SECRET_KEY', None) or os.urandom(24).hex()
 app.secret_key = SECRET_KEY
@@ -256,7 +236,6 @@ def is_admin_user():
     return bool(user and user.get('is_admin'))
 
 
-# expose a few helpful vars to all templates so templates can use them directly
 @app.context_processor
 def inject_template_globals():
     runtime = get_runtime_settings()
@@ -441,9 +420,6 @@ def audit_log(action, details=''):
     finally:
         conn.close()
 
-# ---------------------------------
-# DATABASE INIT
-# ---------------------------------
 def init_db(db_url=None):
     global DATABASE_URL, DB_PATH
     resolved_db_url = db_url or DATABASE_URL
@@ -535,20 +511,21 @@ def init_db(db_url=None):
     c.execute("ALTER TABLE uploads ADD COLUMN IF NOT EXISTS processing_error TEXT")
     conn.commit()
 
-    # Bootstrap admin user if not present.
-    admin_password = ADMIN_PASS or 'changeme'
+    admin_password = (ADMIN_PASS or '').strip()
     now = datetime.utcnow().isoformat()
     c.execute('SELECT id FROM users WHERE username = ?', (ADMIN_USER,))
     existing_admin = c.fetchone()
     if not existing_admin:
-        c.execute(
-            '''INSERT INTO users (username, password_hash, is_admin, is_active, created_at, updated_at)
-               VALUES (?, ?, 1, 1, ?, ?)''',
-            (ADMIN_USER, generate_password_hash(admin_password), now, now),
-        )
-        logger.info('Bootstrapped admin user: %s', ADMIN_USER)
+        if admin_password:
+            c.execute(
+                '''INSERT INTO users (username, password_hash, is_admin, is_active, created_at, updated_at)
+                   VALUES (?, ?, 1, 1, ?, ?)''',
+                (ADMIN_USER, generate_password_hash(admin_password), now, now),
+            )
+            logger.info('Bootstrapped admin user: %s', ADMIN_USER)
+        else:
+            logger.warning('Admin user bootstrap skipped because ADMIN_PASS is not set.')
 
-    # Seed default path and control settings if missing.
     defaults = {
         'upload_folder': app.config.get('UPLOAD_FOLDER', UPLOAD_FOLDER),
         'route_dir_invoice': os.path.join(app.config.get('UPLOAD_FOLDER', UPLOAD_FOLDER), DEFAULT_ROUTE_DIRS['invoice']),
@@ -590,9 +567,6 @@ def init_db(db_url=None):
     conn.close()
     ensure_settings_schema(resolved_db_url)
 
-# ---------------------------------
-# HELPERS
-# ---------------------------------
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -640,12 +614,10 @@ def _save_and_queue_file(saved_filename, source_path, upload_root, uploader_emai
 
 
 def _normalize_webhook_json_payload(payload):
-    """Normalize provider-specific webhook payloads to (sender, attachments)."""
     sender = None
     attachments = []
     provider = str(payload.get('provider') or payload.get('source') or '').strip().lower()
 
-    # Sender detection across common payload styles.
     sender = (
         payload.get('sender')
         or payload.get('uploader_email')
@@ -667,7 +639,6 @@ def _normalize_webhook_json_payload(payload):
     if isinstance(message.get('attachments'), list):
         candidate_lists.append(message.get('attachments'))
 
-    # Microsoft Graph notifications often carry resourceData/value arrays.
     if isinstance(payload.get('value'), list):
         for item in payload.get('value'):
             if not isinstance(item, dict):
@@ -734,7 +705,6 @@ def simple_summarize(text, max_sentences=4):
     if not cleaned:
         return "No text extracted."
 
-    # Prefer spaCy sentence boundaries when model is available.
     if nlp:
         try:
             doc = nlp(cleaned)
@@ -744,7 +714,6 @@ def simple_summarize(text, max_sentences=4):
         except Exception as e:
             logger.warning("spaCy summarization fallback triggered: %s", e)
 
-    # Fallback for environments where spaCy model/sentencizer is unavailable.
     parts = re.split(r"(?<=[.!?])\s+|\n+", cleaned)
     parts = [p.strip() for p in parts if p and p.strip()]
     if parts:
@@ -754,19 +723,9 @@ def simple_summarize(text, max_sentences=4):
 
 
 def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=None, timeout_seconds=10):
-    """Extract text from files with OCR disabled by default (too slow).
-    
-    Args:
-        file_path: Path to file to extract from
-        ocr_dpi: DPI for OCR (lower=faster but lower quality, default from OCR_DPI env)
-        max_pages_for_ocr: Max pages to OCR (default from env)
-        enable_ocr: If False, skip OCR entirely. Default from ENABLE_OCR env var.
-        timeout_seconds: Timeout for OCR operations
-    """
     if not file_path or not os.path.exists(file_path):
         return ""
     
-    # Use global config if not overridden
     if ocr_dpi is None:
         ocr_dpi = OCR_DPI
     if max_pages_for_ocr is None:
@@ -780,7 +739,6 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
         try:
             processed = ImageOps.exif_transpose(img)
             processed = processed.convert('L')
-            # Upscale small images to improve OCR legibility on scanned docs.
             if processed.width < 1400:
                 scale = max(1, int(1400 / max(1, processed.width)))
                 if scale > 1:
@@ -819,13 +777,12 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
     try:
         if ext == 'txt':
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                return f.read()[:EXTRACT_MAX_TEXT_BYTES]  # limit text to configured max
+                return f.read()[:EXTRACT_MAX_TEXT_BYTES]
 
         if ext == 'pdf':
             try:
                 texts = []
                 with pdfplumber.open(file_path) as pdf:
-                    # Only process first N pages for text extraction
                     for i, page in enumerate(pdf.pages[:EXTRACT_PDF_MAX_PAGES]):
                         if i >= EXTRACT_PDF_MAX_PAGES:
                             break
@@ -834,21 +791,19 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
                             texts.append(page_text)
                 combined = "\n".join(texts).strip()
                 if combined:
-                    return combined[:EXTRACT_MAX_TEXT_BYTES]  # limit to configured max
+                    return combined[:EXTRACT_MAX_TEXT_BYTES]
             except Exception as e:
                 logger.debug("pdfplumber error: %s", e)
 
-            # Only do OCR if explicitly enabled (very slow!)
             if not enable_ocr:
                 logger.debug("OCR disabled for %s (pdfplumber found no text)", file_path)
-                return ""  # Return empty instead of doing slow OCR
+                return ""
 
             try:
                 import signal
                 def timeout_handler(signum, frame):
                     raise TimeoutError(f"OCR timeout after {timeout_seconds}s")
                 
-                # Convert only first 3 pages to images (not entire document)
                 images = convert_from_path(file_path, dpi=ocr_dpi, first_page=1, last_page=min(3, 999))
             except Exception as e:
                 logger.debug("pdf2image error: %s", e)
@@ -863,13 +818,13 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
                         ocr_texts.append(txt)
                 except Exception as e:
                     logger.debug("pytesseract error on page %d: %s", i, e)
-            return ("\n".join(ocr_texts).strip())[:EXTRACT_MAX_TEXT_BYTES]  # limit to configured max
+            return ("\n".join(ocr_texts).strip())[:EXTRACT_MAX_TEXT_BYTES]
 
         if ext in ('docx', 'doc'):
             try:
                 document = docx.Document(file_path)
                 paragraphs = [p.text for p in document.paragraphs if p.text.strip()]
-                return ("\n".join(paragraphs).strip())[:EXTRACT_MAX_TEXT_BYTES]  # limit to configured max
+                return ("\n".join(paragraphs).strip())[:EXTRACT_MAX_TEXT_BYTES]
             except Exception as e:
                 logger.debug("docx error: %s", e)
                 return ""
@@ -1189,10 +1144,6 @@ def get_latest_upload_by_filename(filename):
 
 
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None, attachment_name=None):
-    """
-    Send one email with an optional single attachment.
-    Returns True on success, False on failure.
-    """
     runtime = get_runtime_settings()
     smtp_user = runtime.get('email_user')
     smtp_pass = runtime.get('email_pass')
@@ -1201,7 +1152,7 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
     smtp_port = _safe_int(runtime.get('smtp_port'), 587)
 
     if not smtp_user or not smtp_pass:
-        print("SMTP credentials missing.")
+        logger.error("SMTP credentials are missing")
         return False
     try:
         msg = EmailMessage()
@@ -1221,20 +1172,14 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
             smtp.starttls()
             smtp.login(smtp_user, smtp_pass)
             smtp.send_message(msg)
-        print(f"📨 Sent single email with subject: {subject} to {to_email}")
+        logger.info("Email sent: to=%s subject=%s", to_email, subject)
         return True
     except Exception as e:
-        print("Email send error:", e)
+        logger.error("Email send failed: %s", e)
         return False
 
 
 def send_email_with_attachments(to_email, subject, body_text, attachment_paths=None, attachment_names=None):
-    """
-    Send an email (SMTP) with multiple attachments.
-    - attachment_paths: list of file paths to attach (can be empty or None)
-    - attachment_names: optional list of filenames to use for attachments (same length as attachment_paths)
-    Returns True on success, False on failure.
-    """
     runtime = get_runtime_settings()
     smtp_user = runtime.get('email_user')
     smtp_pass = runtime.get('email_pass')
@@ -1243,7 +1188,7 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
     smtp_port = _safe_int(runtime.get('smtp_port'), 587)
 
     if not smtp_user or not smtp_pass:
-        print("SMTP credentials missing.")
+        logger.error("SMTP credentials are missing")
         return False
     try:
         msg = EmailMessage()
@@ -1256,7 +1201,7 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
             for idx, ap in enumerate(attachment_paths):
                 try:
                     if not ap or not os.path.exists(ap):
-                        print(f"⚠️ Attachment missing, skipping: {ap}")
+                        logger.warning("Attachment missing; skipping: %s", ap)
                         continue
                     fname = None
                     if attachment_names and idx < len(attachment_names):
@@ -1266,35 +1211,29 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
                     maintype, subtype = (ctype or 'application/octet-stream').split('/', 1)
                     with open(ap, 'rb') as f:
                         msg.add_attachment(f.read(), maintype=maintype, subtype=subtype, filename=fname)
-                    print(f"📎 Attached: {fname}")
+                    logger.info("Attachment added: %s", fname)
                 except Exception as e:
-                    print(f"Failed to attach {ap}: {e}")
+                    logger.warning("Failed to attach %s: %s", ap, e)
 
         with smtplib.SMTP(smtp_server, smtp_port) as smtp:
             smtp.starttls()
             smtp.login(smtp_user, smtp_pass)
             smtp.send_message(msg)
-        print(f"✅ Email with {len(attachment_paths or [])} attachments sent to {to_email}")
+        logger.info("Email with attachments sent: to=%s count=%d", to_email, len(attachment_paths or []))
         return True
     except Exception as e:
-        print("Email send error (multiple attachments):", e)
+        logger.error("Email send with attachments failed: %s", e)
         return False
 
 
 def process_document_in_background(file_path, filename, uploader_email, upload_id=None):
-    """
-    Process a document in the background (extract, classify, summarize, log).
-    This runs in a separate thread to avoid blocking the upload response.
-    """
     try:
-        logger.info("🔄 Background processing started for: %s", filename)
+        logger.info("Background processing started: %s", filename)
         runtime = get_runtime_settings()
         
         update_upload_record(upload_id, processing_status='extracting')
-        # Extract text (OCR setting from ENABLE_OCR env var)
         text = extract_text(file_path, enable_ocr=ENABLE_OCR)
         
-        # Summarize
         summary = simple_summarize(text)
         
         update_upload_record(upload_id, processing_status='classifying')
@@ -1304,7 +1243,6 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
         if requires_review:
             category = 'review_required'
         
-        # Resume scoring if applicable
         resume_score = None
         resume_rank_note = None
         resume_risk_score = None
@@ -1343,7 +1281,6 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
             processing_error=processing_error,
         )
         
-        # Optional local routing output copy
         if runtime.get('route_local_enabled') and not requires_review:
             route_dir = get_route_output_dir(category, runtime)
             if route_dir:
@@ -1354,7 +1291,6 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
                 except Exception as e:
                     logger.warning('Failed to copy routed file to %s: %s', route_dir, e)
         
-        # Optional auto-reply to uploader
         if uploader_email:
             from_name = runtime.get('from_name') or FROM_NAME
             reply_subject = f"Receipt: {filename} (classified: {category})"
@@ -1364,11 +1300,11 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
             except Exception as e:
                 logger.warning("Auto-reply failed for %s: %s", uploader_email, e)
         
-        logger.info("✅ Background processing completed for: %s (category: %s)", filename, category)
+        logger.info("Background processing completed: %s (category=%s)", filename, category)
         
     except Exception as e:
         update_upload_record(upload_id, processing_status='failed', processing_error=str(e))
-        logger.error("❌ Background processing failed for %s: %s", filename, e)
+        logger.error("Background processing failed for %s: %s", filename, e)
 
 def route_for_category(category):
     runtime = get_runtime_settings()
@@ -1382,9 +1318,6 @@ def route_for_category(category):
     dest = mapping.get(category)
     return dest if dest and dest.strip() else None
 
-# ---------------------------------
-# ROUTES
-# ---------------------------------
 @app.route('/')
 @login_required
 def index():
@@ -1394,13 +1327,6 @@ def index():
 @app.route('/upload', methods=['POST'])
 @login_required
 def upload_file():
-    """
-    Optimized upload endpoint:
-    - Saves files immediately (fast)
-    - Moves to category folders immediately
-    - Returns success page immediately
-    - Processing (extraction, classification, etc.) happens in background threads
-    """
     if 'file' not in request.files:
         return redirect(request.url)
 
@@ -1414,10 +1340,9 @@ def upload_file():
     upload_root = _normalize_dir(runtime.get('upload_folder')) or os.path.abspath(UPLOAD_FOLDER)
     app.config['UPLOAD_FOLDER'] = upload_root
     
-    results = []  # For display in response (minimal info)
+    results = []
     batch_sent_info = []
 
-    # ===== PHASE 1: Save files immediately (fast) =====
     os.makedirs(upload_root, exist_ok=True)
     saved_files = []
     
@@ -1430,18 +1355,14 @@ def upload_file():
         saved_filename = f"{timestamp}_{filename}"
         saved_path = os.path.join(upload_root, saved_filename)
         
-        # Save file
         file.save(saved_path)
         
-        # Quick classification guess (keywords only, no ML) for folder routing
         with open(saved_path, 'rb') as f:
             try:
-                # Quick text peek for classification
                 peek_text = f.read(5000).decode('utf-8', errors='ignore').lower()
             except:
                 peek_text = ""
         
-        # Simple keyword-based quick classification for folder
         if 'invoice' in peek_text or 'amount due' in peek_text:
             quick_category = 'invoice'
         elif 'payslip' in peek_text or 'salary' in peek_text:
@@ -1455,7 +1376,6 @@ def upload_file():
         else:
             quick_category = 'other'
         
-        # Create category folder and move file (fast operation)
         cat_folder = "".join(ch for ch in quick_category if ch.isalnum() or ch in ('_', '-')).lower() or 'other'
         target_dir = os.path.join(upload_root, cat_folder)
         os.makedirs(target_dir, exist_ok=True)
@@ -1489,8 +1409,6 @@ def upload_file():
     if not saved_files:
         return "No valid files uploaded.", 400
 
-    # ===== PHASE 2: Start background processing threads =====
-    # Process each file in background threads (extraction, classification, etc.)
     for file_info in saved_files:
         thread = threading.Thread(
             target=process_document_in_background,
@@ -1499,8 +1417,6 @@ def upload_file():
         )
         thread.start()
     
-    # ===== PHASE 3: Start background email forwarding thread =====
-    # Email batch forwarding happens asynchronously
     if runtime.get('route_email_enabled'):
         thread = threading.Thread(
             target=_send_batch_emails_async,
@@ -1509,7 +1425,6 @@ def upload_file():
         )
         thread.start()
 
-    # ===== Return immediately without waiting for processing =====
     return render_template('result_batch.html', results=results)
 
 
@@ -1527,7 +1442,6 @@ def webhook_ingest_email():
 
     files = request.files.getlist('file')
     if not files:
-        # Fallback for generic multipart payloads with arbitrary field names.
         files = list(request.files.values())
 
     uploader_email = (request.form.get('sender') or request.form.get('uploader_email') or request.form.get('email') or '').strip() or None
@@ -1574,7 +1488,6 @@ def webhook_ingest_email():
             'status': 'queued',
         })
 
-    # Provider-style JSON attachments (Gmail/Graph-like) with base64 content.
     for item in json_attachments:
         filename = secure_filename(item.get('filename') or '')
         if not filename:
@@ -1626,16 +1539,13 @@ def webhook_ingest_email():
 
 
 def _send_batch_emails_async(saved_files, runtime):
-    """Send batch emails in background (after file processing completes)."""
     try:
-        # Give processing threads time to complete (max 30 seconds)
-        logger.info("⏳ Waiting for document processing before sending batch emails...")
+        logger.info("Waiting for document processing before sending batch emails")
         time.sleep(5)
         
         timestamp = datetime.utcnow().strftime('%Y%m%d%H%M%S')
         upload_root = _normalize_dir(runtime.get('upload_folder')) or os.path.abspath(UPLOAD_FOLDER)
         
-        # Query processed documents and group by recipient
         from collections import defaultdict
         batch_map = defaultdict(list)
         
@@ -1663,7 +1573,6 @@ def _send_batch_emails_async(saved_files, runtime):
             except Exception as e:
                 logger.warning("Failed to fetch processed file info: %s", e)
         
-        # Send batch emails
         for recipient, items in batch_map.items():
             si = StringIO()
             writer = csv.writer(si)
@@ -1691,7 +1600,6 @@ def _send_batch_emails_async(saved_files, runtime):
             attachment_paths = [csv_path]
             attachment_names = [os.path.basename(csv_path)]
 
-            # Attach actual files
             for it in items:
                 p = it.get('saved_path')
                 if p and os.path.exists(p) and os.path.isfile(p):
@@ -1711,10 +1619,9 @@ def _send_batch_emails_async(saved_files, runtime):
             body_lines.extend(["", "Both the original files and a CSV summary are attached."])
             body = "\n".join(body_lines)
 
-            logger.info("📤 Sending batch email to %s with %d files...", recipient, len(items))
+            logger.info("Sending batch email to %s with %d files", recipient, len(items))
             send_email_with_attachments(recipient, subj, body, attachment_paths=attachment_paths, attachment_names=attachment_names)
             
-            # Cleanup temp CSV
             try:
                 if os.path.exists(csv_path):
                     os.remove(csv_path)
@@ -1722,7 +1629,7 @@ def _send_batch_emails_async(saved_files, runtime):
                 logger.warning("Failed to delete temp CSV: %s", e)
                 
     except Exception as e:
-        logger.error("❌ Batch email sending failed: %s", e)
+        logger.error("Batch email sending failed: %s", e)
 
 @app.route('/chat')
 @login_required
@@ -1760,15 +1667,6 @@ from io import StringIO
 @app.route('/chat/send', methods=['POST'])
 @login_required
 def chat_send():
-    """
-    Enhanced rule-based chat endpoint with:
-      - FAQ + pattern matching
-      - DB-connected answers (counts, last uploads)
-      - Action triggers: forward by category, export CSV
-      - Multi-step dialogs stored in session['pending_action']
-      - Memory for user name in session['user_name']
-      - Logs both user and assistant messages to chats table
-    """
     data = request.get_json() or {}
     session_id = data.get('session_id', 'default')
     raw_prompt = (data.get('prompt') or '').strip()
@@ -1779,7 +1677,6 @@ def chat_send():
     prompt = raw_prompt.strip()
     lower = prompt.lower()
 
-    # Persist user message to chats table
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -1788,15 +1685,13 @@ def chat_send():
         conn.commit()
         conn.close()
     except Exception as e:
-        print("DB write (user) failed:", e)
+        logger.warning("DB write failed for user chat message: %s", e)
 
-    # Initialize session state containers
     if 'pending_action' not in session:
         session['pending_action'] = None
     if 'user_name' not in session:
         session['user_name'] = None
 
-    # Helper: execute a simple DB query and return rows
     def db_query(sql, params=()):
         try:
             conn = sqlite3.connect(DB_PATH)
@@ -1806,10 +1701,9 @@ def chat_send():
             conn.close()
             return rows
         except Exception as e:
-            print("DB query error:", e)
+            logger.warning("DB query failed in chat handler: %s", e)
             return []
 
-    # Helper: count files by category or overall
     def count_category(cat=None):
         if cat:
             r = db_query("SELECT COUNT(*) FROM uploads WHERE category = ?", (cat,))
@@ -1817,7 +1711,6 @@ def chat_send():
             r = db_query("SELECT COUNT(*) FROM uploads")
         return r[0][0] if r else 0
 
-    # Helper: last N uploads (id, filename, category, uploaded_at)
     def last_uploads(n=5, category=None):
         if category:
             rows = db_query("SELECT id, filename, category, uploaded_at FROM uploads WHERE category = ? ORDER BY id DESC LIMIT ?", (category, n))
@@ -1825,9 +1718,7 @@ def chat_send():
             rows = db_query("SELECT id, filename, category, uploaded_at FROM uploads ORDER BY id DESC LIMIT ?", (n,))
         return rows
 
-    # Helper: forward files for a given category to configured route (reuses send_email_with_attachment)
     def forward_files_to_route(category, recipient):
-        # fetch saved_paths for last X matching files (we forward up to 10 newest to keep payload sane)
         files = db_query("SELECT filename, saved_path FROM uploads WHERE category = ? ORDER BY id DESC LIMIT 10", (category,))
         if not files:
             return False, "No recently uploaded files found for that category."
@@ -1849,7 +1740,6 @@ def chat_send():
             msg += " Failures: " + ", ".join(failures)
         return sent_any, msg
 
-    # Helper: export a CSV summary of last N uploads for a category OR all
     def export_summary_csv(category=None, n=100):
         if category:
             rows = db_query("SELECT filename, category, uploader_email, uploaded_at, saved_path, summary FROM uploads WHERE category = ? ORDER BY id DESC LIMIT ?", (category, n))
@@ -1871,17 +1761,13 @@ def chat_send():
                 f.write(csv_text)
             return path, None
         except Exception as e:
-            print("CSV write failed:", e)
+            logger.warning("CSV export write failed: %s", e)
             return None, "Failed to write CSV."
 
-    # If there's a pending multi-step action, handle confirmations/next step
     pending = session.get('pending_action')
     if pending:
-        # Example pending shapes:
-        # {'type':'forward_confirm','category':'invoice','recipient':'x@y.com'}
         pt = pending.get('type')
         if pt == 'forward_confirm':
-            # expecting yes/no
             if lower in ('yes','y','sure','ok','please do','do it'):
                 category = pending.get('category')
                 recipient = pending.get('recipient')
@@ -1891,7 +1777,6 @@ def chat_send():
             else:
                 session['pending_action'] = None
                 reply_text = "Okay — cancelled forwarding."
-            # persist assistant reply
             try:
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
@@ -1900,16 +1785,15 @@ def chat_send():
                 conn.commit()
                 conn.close()
             except Exception as e:
-                print("DB write (assistant) failed:", e)
+                logger.warning("DB write failed for assistant chat message: %s", e)
             return jsonify({'reply': reply_text})
 
         if pt == 'export_confirm':
             if lower in ('yes','y','ok','export','please'):
-                category = pending.get('category')  # may be None for all
+                category = pending.get('category')
                 path, err = export_summary_csv(category=category, n=500)
                 session['pending_action'] = None
                 if path:
-                    # if admin email configured, attach and send
                     admin = ADMIN_EMAIL or os.getenv('ADMIN_EMAIL')
                     runtime = get_runtime_settings()
                     admin = runtime.get('admin_email') or admin
@@ -1921,7 +1805,6 @@ def chat_send():
             else:
                 session['pending_action'] = None
                 reply_text = "Export cancelled."
-            # persist assistant reply
             try:
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
@@ -1930,13 +1813,11 @@ def chat_send():
                 conn.commit()
                 conn.close()
             except Exception as e:
-                print("DB write (assistant) failed:", e)
+                logger.warning("DB write failed for assistant chat message: %s", e)
             return jsonify({'reply': reply_text})
 
-    # No pending action — normal processing
     reply_text = None
 
-    # 1) Name capture: "my name is X" or "call me X"
     if any(phrase in lower for phrase in ("my name is ", "call me ")):
         import re
         m = re.search(r"(?:my name is|call me)\s+([A-Za-z0-9 _-]{1,40})", prompt, re.I)
@@ -1945,14 +1826,12 @@ def chat_send():
             session['user_name'] = name
             reply_text = f"Nice to meet you, {name}! I will remember that during this session."
         else:
-            reply_text = "I didn't catch the name — please say, for example, 'Call me Ramya'."
+            reply_text = "I did not catch the name. Please say, for example, 'Call me Alex'."
 
-    # 2) FAQ / simple intents
     faq_map = {
-        # 👋 Greetings & Basic Help
-        'hello': "Hey there 👋! I’m your Smart Document Hub Assistant. I can help you manage and classify your files automatically.",
+        'hello': "Hello. I am your Smart Document Hub assistant. I can help you manage and classify your files automatically.",
         'hi': "Hi! How’s it going? You can ask me to show your uploads, count invoices, or even export a CSV summary.",
-        'hey': "Hey! 😊 Ready to organize your documents today?",
+        'hey': "Hey! Ready to organize your documents today?",
         'help': (
             "Here’s what I can do for you:\n"
             "• Upload & auto-classify files (Invoice, Payslip, etc.)\n"
@@ -1964,7 +1843,6 @@ def chat_send():
         ),
         'what can you do': "I help you organize, summarize, and forward your business documents automatically.",
 
-        # 📂 Uploads & Processing
         'upload': (
             "To upload a file, go to the Home page and click 'Upload'. "
             "I'll extract text, summarize it, classify it (Invoice, Payslip, etc.), and store it neatly."
@@ -1973,13 +1851,11 @@ def chat_send():
         'multiple files': "Yes, you can upload multiple files at once! I’ll classify each automatically.",
         'formats': "I currently support PDF, DOCX, TXT, and PPTX files. You can also upload scanned PDFs — I’ll read them using OCR.",
 
-        # 🧠 Classification
         'classify': "I automatically classify files into Invoice, Payslip, Purchase Order, or Minutes of Meeting based on their content.",
         'categories': "I currently recognize 4 categories: invoices, payslips, purchase orders, and meeting minutes.",
         'add category': "For now, categories are fixed, but we can train a model or add new rules to expand classification.",
         'ppt': "Yes, I can now read and classify PPT and PPTX files too!",
 
-        # 🔎 History & Reports
         'history': (
             "Open the History page to view all uploads with filters for category, date, and keywords. "
             "You can also export them as CSV."
@@ -1990,7 +1866,6 @@ def chat_send():
         ),
         'report': "I can export a detailed CSV report of your classified documents. Try saying: 'Export payslips'.",
 
-        # ✉️ Email & Forwarding
         'forward': (
             "You can ask me to forward documents automatically! For example, type 'Forward invoices'. "
             "I'll send the latest ones to the configured email."
@@ -2000,13 +1875,11 @@ def chat_send():
             "All outgoing and incoming emails are managed using Gmail’s SMTP and IMAP via your environment configuration."
         ),
 
-        # 🧾 Stats
-        'how many': None,  # handled dynamically
+        'how many': None,
         'count': None,
         'total': None,
         'summary': "I summarize each file briefly when you upload it — it helps identify the key content quickly.",
 
-        # ⚙️ Settings
         'routes': (
             f"Here are the configured routing emails:\n"
             f"• Invoices → {route_for_category('invoice') or 'not set'}\n"
@@ -2018,21 +1891,18 @@ def chat_send():
             "To change routes and mailbox credentials, open Admin Settings from the dashboard."
         ),
 
-        # 🧑 Personal
-        'who made you': "I was created by Ramya S, as part of the Smart Document Hub project 💻.",
-        'your name': "You can call me DocuBot 🤖 — your document assistant.",
-        'bye': "Goodbye! 👋 Have a productive day ahead!",
-        'thanks': "You're very welcome, Ramya! 😊",
+        'who made you': "I was created as part of the Smart Document Hub project.",
+        'your name': "You can call me Smart Document Hub Assistant.",
+        'bye': "Goodbye. Have a productive day ahead!",
+        'thanks': "You are very welcome.",
         'thank you': "Anytime! Always happy to help!",
     }
 
-    # direct exact keyword check (small)
     for k, v in faq_map.items():
         if k in lower and v:
             reply_text = v
             break
 
-    # 3) Count queries (e.g., "how many invoices", "count invoices")
     if not reply_text and any(w in lower for w in ('how many', 'count', 'number of')):
         for cat_keyword, cat_name in [('invoice','invoice'), ('payslip','payslip'), ('purchase','purchase_order'), ('minutes','minutes')]:
             if cat_keyword in lower:
@@ -2043,12 +1913,10 @@ def chat_send():
             total = count_category(None)
             reply_text = f"Total uploaded files: {total}."
 
-    # 4) Last uploads (e.g., "show last 5 uploads", "recent invoices")
     if not reply_text and any(kw in lower for kw in ('last', 'recent', 'show')) and ('upload' in lower or 'uploads' in lower or 'recent' in lower):
         import re
         m = re.search(r'last\s+(\d{1,2})', lower)
         n = int(m.group(1)) if m else 5
-        # optional category detection
         category = None
         for cat_keyword, cat_name in [('invoice','invoice'), ('payslip','payslip'), ('purchase','purchase_order'), ('minutes','minutes')]:
             if cat_keyword in lower:
@@ -2063,9 +1931,7 @@ def chat_send():
                 out_lines.append(f"{fname} ({cat}) — {uploaded_at or 'time unknown'}")
             reply_text = "Recent uploads:\n" + "\n".join(out_lines[:n])
 
-    # 5) Forward command (e.g., "forward invoices", "please forward invoices")
     if not reply_text and 'forward' in lower:
-        # find category
         category = None
         for cat_keyword, cat_name in [('invoice','invoice'), ('payslip','payslip'), ('purchase','purchase_order'), ('minutes','minutes')]:
             if cat_keyword in lower:
@@ -2078,13 +1944,10 @@ def chat_send():
             if not recipient:
                 reply_text = f"No route configured for {category}. Update it in Admin Settings."
             else:
-                # ask for confirmation as a multi-step action
                 session['pending_action'] = {'type':'forward_confirm','category':category,'recipient':recipient}
                 reply_text = f"Do you want me to forward the recent files in category '{category}' to {recipient}? Reply 'yes' to confirm."
 
-    # 6) Export command (e.g., "export invoices", "export csv")
     if not reply_text and ('export' in lower or 'download csv' in lower or 'export csv' in lower):
-        # optional category
         category = None
         for cat_keyword, cat_name in [('invoice','invoice'), ('payslip','payslip'), ('purchase','purchase_order'), ('minutes','minutes')]:
             if cat_keyword in lower:
@@ -2093,12 +1956,10 @@ def chat_send():
         session['pending_action'] = {'type':'export_confirm','category':category}
         reply_text = f"Okay — I'll create a CSV export for {category or 'all categories'}. Reply 'yes' to proceed."
 
-    # 7) Misc: name greeting, or default local reply
     if not reply_text:
         if session.get('user_name'):
             reply_text = f"Yes {session.get('user_name')} — I heard: \"{prompt}\". Do you want help with uploads, history, forwarding or export?"
         else:
-            # fallback short intelligent echo + prompt suggestions
             try:
                 sents = sent_tokenize(prompt)
                 snippet = (sents[0] if sents else prompt)[:200]
@@ -2106,7 +1967,6 @@ def chat_send():
                 snippet = prompt[:200]
             reply_text = f"(Local assistant) I got: \"{snippet}\". Try: 'How many invoices?', 'Show recent uploads', 'Forward invoices', or 'Export invoices CSV'."
 
-    # Persist assistant reply
     try:
         conn = sqlite3.connect(DB_PATH)
         c = conn.cursor()
@@ -2115,9 +1975,8 @@ def chat_send():
         conn.commit()
         conn.close()
     except Exception as e:
-        print("DB write (assistant) failed:", e)
+        logger.warning("DB write failed for assistant chat message: %s", e)
 
-    # Return reply
     return jsonify({'reply': reply_text})
 
 @app.route('/chat/history')
@@ -2131,7 +1990,6 @@ def chat_history():
     conn.close()
     return jsonify({'history': [{'role': r, 'message': m} for r, m in rows]})
 
-# ---------------------- History page + export ----------------------
 @app.route('/history')
 @login_required
 def history_page():
@@ -2212,7 +2070,6 @@ def history_export():
     resp.headers['Content-Disposition'] = 'attachment; filename=uploads_history.csv'
     return resp
 
-# ---------------- Secure file serving ----------------
 @app.route('/uploads/<path:filename>')
 @login_required
 def download_file(filename):
@@ -2234,13 +2091,10 @@ def download_file(filename):
                     rel_path_posix = rel_path.replace(os.path.sep, '/')
                     return send_from_directory(uploads_dir, rel_path_posix, as_attachment=True)
     except Exception as e:
-        print("download_file search error:", e)
+        logger.warning("Download lookup failed: %s", e)
 
     return abort(404)
 
-# ---------------------------------
-# AUTH ROUTES (login/logout)
-# ---------------------------------
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     next_url = request.args.get('next') or url_for('index')
@@ -2644,7 +2498,6 @@ def admin_settings():
             flash(f'Failed to save settings: {e}', 'error')
             return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
 
-        # Runtime apply for paths and logging.
         app.config['UPLOAD_FOLDER'] = updates['upload_folder']
         LOG_FILE_PATH = updates['log_file_path']
         LOG_LEVEL = updates['log_level']
@@ -2652,7 +2505,6 @@ def admin_settings():
 
         audit_log('settings_updated', 'Updated SMTP/IMAP, routes, resume ranking, storage, and logging settings.')
 
-        # Apply changes immediately for IMAP worker without restart.
         try:
             from imap_fetcher import reload_runtime_config
             reload_runtime_config()
@@ -2843,7 +2695,6 @@ def admin_review_queue():
             resume_score, resume_rank_note = score_resume(text, prefs)
             resume_risk_score, resume_risk_flags = assess_resume_risk(text)
 
-        # Apply admin decision and clear review error state.
         update_upload_record(
             upload_id,
             category=selected_category,
@@ -2855,7 +2706,6 @@ def admin_review_queue():
             processing_error=None,
         )
 
-        # Route to local folder if enabled.
         if runtime.get('route_local_enabled') and saved_path and os.path.exists(saved_path):
             route_dir = get_route_output_dir(selected_category, runtime)
             if route_dir:
@@ -2865,7 +2715,6 @@ def admin_review_queue():
                 except Exception as e:
                     logger.warning('Manual routing copy failed for upload_id=%s: %s', upload_id, e)
 
-        # Forward manually approved/re-labeled document via email if enabled.
         if runtime.get('route_email_enabled') and saved_path and os.path.exists(saved_path):
             recipient = route_for_category(selected_category)
             if recipient:
@@ -3052,11 +2901,8 @@ def admin_logs():
         total_warnings=total_warnings,
     )
 
-# ---------------- IMAP monitoring helpers (non-invasive) ----------------
-# We set a global thread reference when starting IMAP to allow status checks.
 imap_thread = None
 
-# Expose a small status endpoint to confirm IMAP thread is alive and env routes
 @app.route('/imap_status')
 @login_required
 def imap_status():
@@ -3092,9 +2938,6 @@ def status():
         'log_file_path': runtime.get('log_file_path'),
     })
 
-# ---------------------------------
-# MAIN
-# ---------------------------------
 if __name__ == '__main__':
     init_db()
     runtime = get_runtime_settings()
@@ -3104,7 +2947,6 @@ if __name__ == '__main__':
 
     setup_logging(runtime.get('log_file_path'), runtime.get('log_level'))
 
-    # Start IMAP fetcher only when adapter mode includes IMAP.
     inbound_adapter = (runtime.get('inbound_adapter') or INBOUND_ADAPTER).lower()
     if inbound_adapter in {'imap', 'hybrid'}:
         try:
@@ -3114,12 +2956,12 @@ if __name__ == '__main__':
                 t = threading.Thread(target=poll_imap_loop, name="imap-fetcher-thread", daemon=True)
                 t.start()
                 imap_thread = t
-                print(">>> IMAP fetcher thread started (daemon).")
+                logger.info("IMAP fetcher thread started")
             start_imap_thread()
         except Exception as _e:
-            print("IMAP fetcher not started:", _e)
+            logger.error("IMAP fetcher did not start: %s", _e)
     else:
-        print(f">>> IMAP fetcher skipped due to inbound adapter mode: {inbound_adapter}")
+        logger.info("IMAP fetcher skipped due to inbound adapter mode: %s", inbound_adapter)
 
     host = os.getenv('FLASK_HOST', '0.0.0.0')
     port = int(os.getenv('FLASK_PORT', '5000'))
