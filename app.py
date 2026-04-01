@@ -43,6 +43,8 @@ from settings_store import (
 
 load_dotenv()
 
+logger = logging.getLogger('smart_document_hub')
+
 
 
 try:
@@ -121,8 +123,6 @@ DEFAULT_ROUTE_DIRS = {
 
 ADMIN_USER = os.getenv('ADMIN_USER', 'admin')
 ADMIN_PASS = os.getenv('ADMIN_PASS', '')
-
-logger = logging.getLogger('smart_document_hub')
 
 
 def _bool_from_str(value, default=True):
