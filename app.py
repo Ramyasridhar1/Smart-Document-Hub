@@ -1247,6 +1247,7 @@ def get_latest_upload_by_filename(filename):
         'resume_score': row[8],
         'resume_risk_score': row[9],
         'resume_risk_flags': row[10],
+        'route': route_for_category(row[2]),
     }
 
 
@@ -1397,6 +1398,24 @@ def process_document_in_background(file_path, filename, uploader_email, upload_i
                     shutil.copy2(file_path, routed_path)
                 except Exception as e:
                     logger.warning('Failed to copy routed file to %s: %s', route_dir, e)
+
+        if runtime.get('route_email_enabled') and not requires_review:
+            recipient = route_for_category(category)
+            if recipient:
+                from_name = runtime.get('from_name') or FROM_NAME
+                route_subject = f"[{category.title()}] {filename}"
+                route_body = (
+                    f"Hello,\n\n"
+                    f"A document has been classified as {category}.\n\n"
+                    f"Filename: {filename}\n"
+                    f"Confidence: {confidence:.2f}\n"
+                    f"Summary:\n{summary}\n\n"
+                    f"Thanks,\n{from_name}"
+                )
+                try:
+                    send_email_with_attachment(recipient, route_subject, route_body, file_path, filename)
+                except Exception as e:
+                    logger.warning('Route email failed for %s -> %s: %s', filename, recipient, e)
         
         if uploader_email:
             from_name = runtime.get('from_name') or FROM_NAME
@@ -1524,14 +1543,6 @@ def upload_file():
         )
         thread.start()
     
-    if runtime.get('route_email_enabled'):
-        thread = threading.Thread(
-            target=_send_batch_emails_async,
-            args=(saved_files, runtime),
-            daemon=True
-        )
-        thread.start()
-
     return render_template('result_batch.html', results=results)
 
 
@@ -1630,14 +1641,6 @@ def webhook_ingest_email():
         thread = threading.Thread(
             target=process_document_in_background,
             args=(file_info['saved_path'], file_info['filename'], file_info['uploader_email'], file_info.get('upload_id')),
-            daemon=True,
-        )
-        thread.start()
-
-    if runtime.get('route_email_enabled'):
-        thread = threading.Thread(
-            target=_send_batch_emails_async,
-            args=(saved_files, runtime),
             daemon=True,
         )
         thread.start()

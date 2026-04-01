@@ -94,7 +94,7 @@
                 <td>{% if r.category == 'resume' %}{{ r.resume_score if r.resume_score is not none else '-' }}{% else %}-{% endif %}</td>
                 <td>{% if r.category == 'resume' %}{{ r.resume_risk_score if r.resume_risk_score is not none else '-' }}{% else %}-{% endif %}</td>
                 <td style="max-width:220px; white-space:pre-wrap;">{% if r.category == 'resume' %}{{ (r.resume_risk_flags or [])|join(', ') if r.resume_risk_flags is iterable and r.resume_risk_flags is not string else (r.resume_risk_flags or '-') }}{% else %}-{% endif %}</td>
-                <td>{{ r.route or 'No route' }}</td>
+                <td class="route-cell">{{ r.route or 'processing' }}</td>
                 <td>
                     <a class="button" href="/uploads/{{ (r.saved_path | replace('\\', '/') ) | replace('uploads/', '') }}" target="_blank">View / Download</a>
                 </td>
@@ -129,10 +129,12 @@
                     const statusCell = row.querySelector('.status-cell');
                     const confCell = row.querySelector('.confidence-cell');
                     const summaryCell = row.querySelector('.summary-cell');
+                    const routeCell = row.querySelector('.route-cell');
                     if (categoryCell) categoryCell.textContent = item.category || 'processing';
                     if (statusCell) statusCell.textContent = item.processing_status || '-';
                     if (confCell) confCell.textContent = (item.ml_confidence === null || item.ml_confidence === undefined) ? '-' : Number(item.ml_confidence).toFixed(2);
                     if (summaryCell) summaryCell.textContent = item.summary || (item.processing_error || '-');
+                    if (routeCell) routeCell.textContent = item.route || 'No route';
                 });
             }
 
