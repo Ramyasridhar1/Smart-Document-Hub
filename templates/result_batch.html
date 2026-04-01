@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Upload Results - Smart Document Hub</title>
     <style>
         body {
@@ -12,9 +13,9 @@
             color: #333;
         }
         h1 {
-                        <tr data-filename="{{ r.filename }}">
             text-align: center;
-                                <td class="category-cell">{{ r.category }}</td>
+            margin-bottom: 18px;
+        }
         table {
             width: 95%;
             margin: 20px auto;
@@ -27,6 +28,7 @@
             border-bottom: 1px solid #ddd;
             text-align: left;
             font-size: 14px;
+            vertical-align: top;
         }
         th {
             background-color: #4a90e2;
@@ -42,42 +44,7 @@
             padding: 6px 10px;
             border-radius: 4px;
             font-size: 13px;
-<script>
-    (function () {
-        const rows = Array.from(document.querySelectorAll('tr[data-filename]'));
-        if (!rows.length) return;
-        const filenames = rows.map(row => row.getAttribute('data-filename')).filter(Boolean);
-        if (!filenames.length) return;
-
-        function updateTable(items) {
-            const map = new Map(items.map(item => [item.filename, item]));
-            rows.forEach(row => {
-                const filename = row.getAttribute('data-filename');
-                const item = map.get(filename);
-                if (!item) return;
-                const categoryCell = row.querySelector('.category-cell');
-                const summaryCell = row.querySelector('td:nth-child(5)');
-                if (categoryCell) categoryCell.textContent = item.category || 'processing';
-                if (summaryCell && item.summary) summaryCell.textContent = item.summary;
-            });
-        }
-
-        async function poll() {
-            try {
-                const qs = encodeURIComponent(filenames.join(','));
-                const res = await fetch(`/upload/status?filenames=${qs}`, { credentials: 'same-origin' });
-                if (!res.ok) return;
-                const data = await res.json();
-                updateTable(data.items || []);
-            } catch (e) {
-                console.warn('status polling failed', e);
-            }
-        }
-
-        poll();
-        setInterval(poll, 3000);
-    })();
-</script>
+            display: inline-block;
         }
         a.button:hover {
             background-color: #357ab7;
@@ -91,10 +58,13 @@
             color: #777;
             margin-top: 30px;
         }
+        .summary-cell {
+            max-width: 400px;
+            white-space: pre-wrap;
+        }
     </style>
 </head>
 <body>
-
     <h1>📄 Upload Summary</h1>
 
     {% if results %}
@@ -117,18 +87,16 @@
             {% for r in results %}
             <tr data-filename="{{ r.filename }}">
                 <td>{{ r.filename }}</td>
-                <td>{{ r.category or 'N/A' }}</td>
+                <td class="category-cell">{{ r.category or 'processing' }}</td>
                 <td class="status-cell">{{ r.processing_status or 'queued' }}</td>
                 <td class="confidence-cell">{% if r.ml_confidence is not none %}{{ '%.2f'|format(r.ml_confidence) }}{% else %}-{% endif %}</td>
-                <td class="summary-cell" style="max-width:400px; white-space:pre-wrap;">{{ r.summary }}</td>
+                <td class="summary-cell">{{ r.summary }}</td>
                 <td>{% if r.category == 'resume' %}{{ r.resume_score if r.resume_score is not none else '-' }}{% else %}-{% endif %}</td>
                 <td>{% if r.category == 'resume' %}{{ r.resume_risk_score if r.resume_risk_score is not none else '-' }}{% else %}-{% endif %}</td>
                 <td style="max-width:220px; white-space:pre-wrap;">{% if r.category == 'resume' %}{{ (r.resume_risk_flags or [])|join(', ') if r.resume_risk_flags is iterable and r.resume_risk_flags is not string else (r.resume_risk_flags or '-') }}{% else %}-{% endif %}</td>
                 <td>{{ r.route or 'No route' }}</td>
                 <td>
-                    <a class="button" 
-                       href="/uploads/{{ (r.saved_path | replace('\\', '/') ) | replace('uploads/', '') }}"
-                       target="_blank">View / Download</a>
+                    <a class="button" href="/uploads/{{ (r.saved_path | replace('\\', '/') ) | replace('uploads/', '') }}" target="_blank">View / Download</a>
                 </td>
             </tr>
             {% endfor %}
@@ -144,43 +112,45 @@
         <a class="button" href="/history" style="margin-left:8px;">View Live Status</a>
     </div>
 
-</body>
-<script>
-    (function () {
-        const rows = Array.from(document.querySelectorAll('tr[data-filename]'));
-        if (!rows.length) return;
-        const filenames = rows.map(r => r.getAttribute('data-filename')).filter(Boolean);
-        if (!filenames.length) return;
+    <script>
+        (function () {
+            const rows = Array.from(document.querySelectorAll('tr[data-filename]'));
+            if (!rows.length) return;
+            const filenames = rows.map(row => row.getAttribute('data-filename')).filter(Boolean);
+            if (!filenames.length) return;
 
-        function updateTable(items) {
-            const map = new Map(items.map(it => [it.filename, it]));
-            rows.forEach(row => {
-                const filename = row.getAttribute('data-filename');
-                const item = map.get(filename);
-                if (!item) return;
-                const statusCell = row.querySelector('.status-cell');
-                const confCell = row.querySelector('.confidence-cell');
-                const summaryCell = row.querySelector('.summary-cell');
-                if (statusCell) statusCell.textContent = item.processing_status || '-';
-                if (confCell) confCell.textContent = (item.ml_confidence === null || item.ml_confidence === undefined) ? '-' : Number(item.ml_confidence).toFixed(2);
-                if (summaryCell) summaryCell.textContent = item.summary || (item.processing_error || '-');
-            });
-        }
-
-        async function poll() {
-            try {
-                const qs = encodeURIComponent(filenames.join(','));
-                const res = await fetch(`/upload/status?filenames=${qs}`, { credentials: 'same-origin' });
-                if (!res.ok) return;
-                const data = await res.json();
-                updateTable(data.items || []);
-            } catch (e) {
-                console.warn('status polling failed', e);
+            function updateTable(items) {
+                const map = new Map(items.map(item => [item.filename, item]));
+                rows.forEach(row => {
+                    const filename = row.getAttribute('data-filename');
+                    const item = map.get(filename);
+                    if (!item) return;
+                    const categoryCell = row.querySelector('.category-cell');
+                    const statusCell = row.querySelector('.status-cell');
+                    const confCell = row.querySelector('.confidence-cell');
+                    const summaryCell = row.querySelector('.summary-cell');
+                    if (categoryCell) categoryCell.textContent = item.category || 'processing';
+                    if (statusCell) statusCell.textContent = item.processing_status || '-';
+                    if (confCell) confCell.textContent = (item.ml_confidence === null || item.ml_confidence === undefined) ? '-' : Number(item.ml_confidence).toFixed(2);
+                    if (summaryCell) summaryCell.textContent = item.summary || (item.processing_error || '-');
+                });
             }
-        }
 
-        poll();
-        setInterval(poll, 3000);
-    })();
-</script>
+            async function poll() {
+                try {
+                    const qs = encodeURIComponent(filenames.join(','));
+                    const res = await fetch(`/upload/status?filenames=${qs}`, { credentials: 'same-origin' });
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    updateTable(data.items || []);
+                } catch (e) {
+                    console.warn('status polling failed', e);
+                }
+            }
+
+            poll();
+            setInterval(poll, 3000);
+        })();
+    </script>
+</body>
 </html>
