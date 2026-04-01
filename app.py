@@ -25,12 +25,14 @@ import joblib
 from math import ceil
 import csv
 from io import StringIO
-from functools import wraps
+from functools import wraps, lru_cache
 from flask import session, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 import openai
 import spacy
 import re
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 from settings_store import (
     DEFAULT_SETTING_KEYS,
     SENSITIVE_SETTING_KEYS,
@@ -56,6 +58,8 @@ except OSError:
 
 CLASSIFIER_MODEL_PATH = os.getenv('CLASSIFIER_MODEL_PATH', os.path.join("model", "document_classifier_pipeline.pkl"))
 RESUME_RANKER_MODEL_PATH = os.getenv('RESUME_RANKER_MODEL_PATH', os.path.join("model", "resume_ranker.joblib"))
+CLASSIFIER_FEEDBACK_PATH = os.getenv('CLASSIFIER_FEEDBACK_PATH', os.path.join('training', 'data_generated', 'classifier_feedback.csv'))
+CLASSIFIER_FEEDBACK_MATCH_THRESHOLD = float(os.getenv('CLASSIFIER_FEEDBACK_MATCH_THRESHOLD', '0.58'))
 
 
 def _load_joblib_model(path, label):
@@ -75,6 +79,105 @@ def _load_joblib_model(path, label):
 _ml_pipeline, CLASSIFIER_MODEL_VERSION = _load_joblib_model(CLASSIFIER_MODEL_PATH, 'classifier')
 _ml_resume_ranker, RESUME_RANKER_MODEL_VERSION = _load_joblib_model(RESUME_RANKER_MODEL_PATH, 'resume ranker')
 MODEL_VERSION = CLASSIFIER_MODEL_VERSION
+
+
+def _classifier_feedback_mtime():
+    try:
+        return os.path.getmtime(CLASSIFIER_FEEDBACK_PATH)
+    except OSError:
+        return 0.0
+
+
+@lru_cache(maxsize=8)
+def _load_classifier_feedback_index(feedback_path, feedback_mtime):
+    if not os.path.exists(feedback_path):
+        return None
+
+    texts = []
+    labels = []
+    with open(feedback_path, 'r', encoding='utf-8', newline='') as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            label = (row.get('label') or '').strip().lower()
+            text = (row.get('text') or '').strip()
+            if label not in CLASSIFICATION_CATEGORIES or not text:
+                continue
+            texts.append(text)
+            labels.append(label)
+
+    if not texts:
+        return None
+
+    vectorizer = TfidfVectorizer(ngram_range=(1, 2), max_features=12000, min_df=1)
+    matrix = vectorizer.fit_transform(texts)
+    return {
+        'vectorizer': vectorizer,
+        'matrix': matrix,
+        'labels': labels,
+        'texts': texts,
+    }
+
+
+def _get_learning_text(saved_path=None, summary=None):
+    if saved_path and os.path.exists(saved_path):
+        try:
+            text = (extract_text(saved_path, enable_ocr=ENABLE_OCR) or '').strip()
+            if len(text) >= 30:
+                return text
+        except Exception as exc:
+            logger.warning('Failed to extract review text for learning: %s', exc)
+    return (summary or '').strip()
+
+
+def append_classifier_feedback_example(upload_id, label, text, source_path=None, actor=None):
+    label = (label or '').strip().lower()
+    text = (text or '').strip()
+    if label not in CLASSIFICATION_CATEGORIES or not text:
+        return False
+
+    os.makedirs(os.path.dirname(CLASSIFIER_FEEDBACK_PATH), exist_ok=True)
+    file_exists = os.path.exists(CLASSIFIER_FEEDBACK_PATH)
+    now = datetime.utcnow().isoformat()
+    try:
+        with open(CLASSIFIER_FEEDBACK_PATH, 'a', encoding='utf-8', newline='') as handle:
+            writer = csv.DictWriter(handle, fieldnames=['upload_id', 'label', 'text', 'source_path', 'actor', 'created_at'])
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow({
+                'upload_id': upload_id or '',
+                'label': label,
+                'text': text,
+                'source_path': source_path or '',
+                'actor': actor or 'system',
+                'created_at': now,
+            })
+        _load_classifier_feedback_index.cache_clear()
+        logger.info('Classifier feedback example saved: upload_id=%s label=%s', upload_id, label)
+        return True
+    except Exception as exc:
+        logger.warning('Failed to store classifier feedback example: %s', exc)
+        return False
+
+
+def classify_from_feedback_memory(text):
+    index = _load_classifier_feedback_index(CLASSIFIER_FEEDBACK_PATH, _classifier_feedback_mtime())
+    if not index:
+        return None
+
+    candidate_vector = index['vectorizer'].transform([(text or '').strip()])
+    similarities = cosine_similarity(candidate_vector, index['matrix'])[0]
+    if similarities.size == 0:
+        return None
+
+    best_index = int(similarities.argmax())
+    best_similarity = float(similarities[best_index])
+    if best_similarity < CLASSIFIER_FEEDBACK_MATCH_THRESHOLD:
+        return None
+
+    label = index['labels'][best_index]
+    confidence = min(0.99, 0.70 + (best_similarity * 0.30))
+    top_candidates = f'feedback:{label}:{best_similarity:.2f}'
+    return label, round(confidence, 4), top_candidates
 
 UPLOAD_FOLDER = os.getenv('UPLOAD_FOLDER', 'uploads')
 DATABASE_URL = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/smartdoc')
@@ -850,6 +953,10 @@ def extract_text(file_path, ocr_dpi=None, max_pages_for_ocr=None, enable_ocr=Non
 
 def classify_document_with_confidence(text):
     t = (text or "").lower()
+    feedback_match = classify_from_feedback_memory(text)
+    if feedback_match:
+        return feedback_match
+
     if _ml_pipeline is not None:
         try:
             pred = _ml_pipeline.predict([text or ""])[0]
@@ -2451,6 +2558,7 @@ def admin_settings():
         for key in threshold_keys:
             raw = updates.get(key)
             if raw == '':
+                updates[key] = ''
                 continue
             value = _safe_float(raw, -1)
             if not (0.0 <= value <= 1.0):
@@ -2626,6 +2734,9 @@ def admin_review_queue():
                     extraction_feedback=bulk_extraction_feedback,
                     reviewer_note=bulk_reviewer_note,
                 )
+                if bulk_category in CLASSIFICATION_CATEGORIES:
+                    learning_text = _get_learning_text(saved_path, summary)
+                    append_classifier_feedback_example(rid, bulk_category, learning_text, source_path=saved_path, actor='bulk_review')
                 processed += 1
 
             flash(f'Bulk action completed for {processed} item(s).', 'success')
@@ -2742,6 +2853,9 @@ def admin_review_queue():
             extraction_feedback=extraction_feedback,
             reviewer_note=reviewer_note,
         )
+        if selected_category in CLASSIFICATION_CATEGORIES:
+            learning_text = _get_learning_text(saved_path, summary)
+            append_classifier_feedback_example(upload_id, selected_category, learning_text, source_path=saved_path, actor='manual_review')
         flash('Review decision saved and document routed.', 'success')
         return redirect(url_for('admin_review_queue'))
 
