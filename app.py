@@ -1251,6 +1251,17 @@ def get_latest_upload_by_filename(filename):
     }
 
 
+def _record_email_diagnostic(status, target, context='single', error=''):
+    try:
+        set_setting(DATABASE_URL, 'email_diag_last_status', (status or '').strip())
+        set_setting(DATABASE_URL, 'email_diag_last_target', (target or '').strip())
+        set_setting(DATABASE_URL, 'email_diag_last_context', (context or '').strip())
+        set_setting(DATABASE_URL, 'email_diag_last_error', (error or '').strip())
+        set_setting(DATABASE_URL, 'email_diag_last_at', datetime.utcnow().isoformat())
+    except Exception as exc:
+        logger.warning('Failed to persist email diagnostics: %s', exc)
+
+
 def send_email_with_attachment(to_email, subject, body_text, attachment_path=None, attachment_name=None):
     runtime = get_runtime_settings()
     smtp_user = runtime.get('email_user')
@@ -1261,6 +1272,7 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
 
     if not smtp_user or not smtp_pass:
         logger.error("SMTP credentials are missing")
+        _record_email_diagnostic('failed', to_email, context='single', error='SMTP credentials are missing')
         return False
     try:
         msg = EmailMessage()
@@ -1281,9 +1293,11 @@ def send_email_with_attachment(to_email, subject, body_text, attachment_path=Non
             smtp.login(smtp_user, smtp_pass)
             smtp.send_message(msg)
         logger.info("Email sent: to=%s subject=%s", to_email, subject)
+        _record_email_diagnostic('success', to_email, context='single', error='')
         return True
     except Exception as e:
         logger.error("Email send failed: %s", e)
+        _record_email_diagnostic('failed', to_email, context='single', error=str(e))
         return False
 
 
@@ -1297,6 +1311,7 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
 
     if not smtp_user or not smtp_pass:
         logger.error("SMTP credentials are missing")
+        _record_email_diagnostic('failed', to_email, context='batch', error='SMTP credentials are missing')
         return False
     try:
         msg = EmailMessage()
@@ -1328,9 +1343,11 @@ def send_email_with_attachments(to_email, subject, body_text, attachment_paths=N
             smtp.login(smtp_user, smtp_pass)
             smtp.send_message(msg)
         logger.info("Email with attachments sent: to=%s count=%d", to_email, len(attachment_paths or []))
+        _record_email_diagnostic('success', to_email, context='batch', error='')
         return True
     except Exception as e:
         logger.error("Email send with attachments failed: %s", e)
+        _record_email_diagnostic('failed', to_email, context='batch', error=str(e))
         return False
 
 
@@ -2141,8 +2158,9 @@ def history_page():
     conn.close()
 
     total_pages = max(1, ceil(total / per_page))
+    runtime = get_runtime_settings()
     return render_template('history.html', rows=rows, page=page, per_page=per_page,
-                           total=total, total_pages=total_pages, q=q, category=category)
+                           total=total, total_pages=total_pages, q=q, category=category, runtime=runtime)
 
 
 @app.route('/history/export')
@@ -2402,6 +2420,18 @@ def admin_settings():
     global LOG_FILE_PATH, LOG_LEVEL
 
     runtime = get_runtime_settings()
+    diag_values = {}
+    try:
+        diag_values = get_settings_bulk(DATABASE_URL)
+    except Exception:
+        diag_values = {}
+    email_diag = {
+        'last_status': (diag_values.get('email_diag_last_status') or '-'),
+        'last_target': (diag_values.get('email_diag_last_target') or '-'),
+        'last_context': (diag_values.get('email_diag_last_context') or '-'),
+        'last_error': (diag_values.get('email_diag_last_error') or '-'),
+        'last_at': (diag_values.get('email_diag_last_at') or '-'),
+    }
     display = {
         'EMAIL_USER': runtime.get('email_user') or '',
         'SMTP_SERVER': runtime.get('smtp_server') or '',
@@ -2452,6 +2482,81 @@ def admin_settings():
 
     if request.method == 'POST':
         form = request.form
+        action = (form.get('action') or 'save_settings').strip().lower()
+
+        if action == 'send_test_resume_email':
+            recipient = (runtime.get('route_resume') or '').strip()
+            if not recipient:
+                flash('Resume route email is not configured.', 'error')
+                return redirect(url_for('admin_settings'))
+            subject = 'Smart Document Hub - Resume Route Test'
+            body = (
+                'This is a test email from Smart Document Hub.\n\n'
+                'If you received this, SMTP and resume routing are configured correctly.'
+            )
+            ok = send_email_with_attachment(recipient, subject, body, None, None)
+            if ok:
+                audit_log('settings_test_email', f'resume_route={recipient}')
+                flash(f'Test email sent to {recipient}.', 'success')
+            else:
+                flash('Test email failed. Check SMTP credentials and logs.', 'error')
+            return redirect(url_for('admin_settings'))
+
+        if action == 'purge_history_db':
+            confirm_text = (form.get('confirm_text') or '').strip()
+            if confirm_text != 'ERASE HISTORY':
+                flash("Type 'ERASE HISTORY' exactly to confirm DB history purge.", 'error')
+                return redirect(url_for('admin_settings'))
+            conn = get_db_conn()
+            try:
+                c = conn.cursor()
+                c.execute('DELETE FROM review_feedback')
+                c.execute('DELETE FROM uploads')
+                conn.commit()
+            finally:
+                conn.close()
+            audit_log('history_db_purged', 'Deleted uploads and review_feedback rows from database')
+            flash('History cleared from database. Documents on disk were not deleted.', 'success')
+            return redirect(url_for('admin_settings'))
+
+        if action == 'purge_documents_and_history':
+            confirm_text = (form.get('confirm_text') or '').strip()
+            if confirm_text != 'ERASE ALL DOCUMENTS':
+                flash("Type 'ERASE ALL DOCUMENTS' exactly to confirm full cleanup.", 'error')
+                return redirect(url_for('admin_settings'))
+
+            upload_root = _normalize_dir(runtime.get('upload_folder')) or os.path.abspath(UPLOAD_FOLDER)
+            removed_files = 0
+            if upload_root and os.path.isdir(upload_root):
+                is_root_path = os.path.dirname(upload_root) == upload_root
+                if is_root_path:
+                    flash('Upload folder path is unsafe for bulk deletion. Cleanup aborted.', 'error')
+                    return redirect(url_for('admin_settings'))
+                for root, _, files in os.walk(upload_root):
+                    for fname in files:
+                        fp = os.path.join(root, fname)
+                        try:
+                            os.remove(fp)
+                            removed_files += 1
+                        except Exception as e:
+                            logger.warning('Failed removing file during cleanup: %s (%s)', fp, e)
+
+            conn = get_db_conn()
+            try:
+                c = conn.cursor()
+                c.execute('DELETE FROM review_feedback')
+                c.execute('DELETE FROM uploads')
+                conn.commit()
+            finally:
+                conn.close()
+
+            audit_log('documents_and_history_purged', f'removed_files={removed_files}, upload_root={upload_root}')
+            flash(f'Cleared database history and deleted {removed_files} stored files.', 'success')
+            return redirect(url_for('admin_settings'))
+
+        if action != 'save_settings':
+            flash('Unsupported settings action.', 'error')
+            return redirect(url_for('admin_settings'))
 
         smtp_port = _safe_int(form.get('SMTP_PORT', '').strip(), -1)
         imap_port = _safe_int(form.get('IMAP_PORT', '').strip(), -1)
@@ -2624,7 +2729,7 @@ def admin_settings():
         flash('Settings updated successfully.', 'success')
         return redirect(url_for('admin_settings'))
 
-    return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret)
+    return render_template('settings.html', values=display, has_email_pass=has_email_pass, has_imap_pass=has_imap_pass, has_webhook_secret=has_webhook_secret, email_diag=email_diag)
 
 
 @app.route('/admin/review', methods=['GET', 'POST'])

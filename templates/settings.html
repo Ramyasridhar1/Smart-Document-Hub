@@ -7,6 +7,7 @@
         <p class="text-muted-app">Manage mail credentials, storage locations, routed output folders, logging, and PostgreSQL connection settings from one place. Password fields are encrypted at rest.</p>
 
         <form method="post" action="{{ url_for('admin_settings') }}">
+          <input type="hidden" name="action" value="save_settings">
           <h5 class="mt-2">SMTP Sender</h5>
           <div class="row g-3">
             <div class="col-md-6">
@@ -251,10 +252,59 @@
 
           <div class="mt-4 d-flex gap-2">
             <button class="btn btn-primary" type="submit">Save Settings</button>
+            <a class="btn btn-outline-primary" href="{{ url_for('admin_users') }}">View User Accounts</a>
             <a class="btn btn-outline-secondary" href="{{ url_for('admin_dashboard') }}">Cancel</a>
           </div>
           <p class="small text-muted mt-3 mb-0">Changes apply immediately for upload, routing, resume ranking and logging.</p>
         </form>
+
+        <hr class="my-4">
+        <h5>Admin Actions</h5>
+        <p class="small text-muted">These actions are optional and affect runtime data. Use with care.</p>
+
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          <form method="post" action="{{ url_for('admin_settings') }}" class="d-inline">
+            <input type="hidden" name="action" value="send_test_resume_email">
+            <button class="btn btn-outline-success" type="submit">Send Test Email To Resume Route</button>
+          </form>
+        </div>
+
+        <div class="border rounded p-3 mb-3 bg-light">
+          <h6 class="mb-2">Mail Diagnostics</h6>
+          <div class="small"><strong>Last Status:</strong> {{ email_diag.get('last_status', '-') if email_diag is defined else '-' }}</div>
+          <div class="small"><strong>Last Target:</strong> {{ email_diag.get('last_target', '-') if email_diag is defined else '-' }}</div>
+          <div class="small"><strong>Context:</strong> {{ email_diag.get('last_context', '-') if email_diag is defined else '-' }}</div>
+          <div class="small"><strong>Last Time (UTC):</strong> {{ email_diag.get('last_at', '-') if email_diag is defined else '-' }}</div>
+          <div class="small text-danger"><strong>Last Error:</strong> {{ email_diag.get('last_error', '-') if email_diag is defined else '-' }}</div>
+        </div>
+
+        <div class="border rounded p-3 mb-3">
+          <h6 class="text-danger mb-2">Clear History From Database</h6>
+          <p class="small text-muted mb-2">Deletes upload/review history rows only. Stored files remain untouched.</p>
+          <form method="post" action="{{ url_for('admin_settings') }}" class="row g-2">
+            <input type="hidden" name="action" value="purge_history_db">
+            <div class="col-md-8">
+              <input class="form-control" type="text" name="confirm_text" placeholder="Type ERASE HISTORY to confirm" required>
+            </div>
+            <div class="col-md-4">
+              <button class="btn btn-outline-danger w-100" type="submit">Clear DB History</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="border rounded p-3">
+          <h6 class="text-danger mb-2">Clear Stored Documents And History</h6>
+          <p class="small text-muted mb-2">Deletes stored document files under upload folder and clears upload/review history in DB.</p>
+          <form method="post" action="{{ url_for('admin_settings') }}" class="row g-2">
+            <input type="hidden" name="action" value="purge_documents_and_history">
+            <div class="col-md-8">
+              <input class="form-control" type="text" name="confirm_text" placeholder="Type ERASE ALL DOCUMENTS to confirm" required>
+            </div>
+            <div class="col-md-4">
+              <button class="btn btn-danger w-100" type="submit">Clear Files + History</button>
+            </div>
+          </form>
+        </div>
     </div>
   </div>
 </div>

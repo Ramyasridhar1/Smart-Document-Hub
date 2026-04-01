@@ -29,7 +29,7 @@
   <div class="col-md-3">
     <div class="d-flex gap-2">
       <button type="submit" class="btn btn-primary">Filter</button>
-      <a href="{{ url_for('history_page') }}" class="btn btn-outline-secondary">Reset</a>
+      <button type="button" id="clearHistoryViewBtn" class="btn btn-outline-secondary">Clear Page</button>
     </div>
   </div>
 </form>
@@ -48,6 +48,7 @@
         <th>Risk Score</th>
         <th>Status</th>
         <th>Confidence</th>
+        <th>Routed To</th>
         <th>Model</th>
         <th>Summary</th>
         <th>Processing Notes</th>
@@ -66,6 +67,16 @@
         <td>{{ row[8] if row[8] is not none else '-' }}</td>
         <td>{{ row[13] or '-' }}</td>
         <td>{% if row[10] is not none %}{{ '%.2f'|format(row[10]) }}{% else %}-{% endif %}</td>
+        <td>
+          {% set cat = (row[4] or '') %}
+          {% if cat == 'invoice' %}{{ runtime.get('route_invoice') or '-' }}
+          {% elif cat == 'payslip' %}{{ runtime.get('route_payslip') or '-' }}
+          {% elif cat == 'purchase_order' %}{{ runtime.get('route_purchase_order') or '-' }}
+          {% elif cat == 'minutes' %}{{ runtime.get('route_minutes') or '-' }}
+          {% elif cat == 'resume' %}{{ runtime.get('route_resume') or '-' }}
+          {% else %}-
+          {% endif %}
+        </td>
         <td>{{ row[12] or '-' }}</td>
         <td style="max-width:320px; white-space:pre-wrap;">{{ row[3] }}</td>
         <td style="max-width:260px; white-space:pre-wrap;">{{ row[14] or row[11] or '-' }}</td>
@@ -120,6 +131,31 @@
     }
   }
   document.addEventListener('DOMContentLoaded', checkImap);
+
+  function clearHistoryViewOnly() {
+    const tbody = document.querySelector('table tbody');
+    if (tbody) {
+      tbody.innerHTML = '';
+    }
+    const pager = document.querySelector('nav[aria-label="page navigation"]');
+    if (pager) {
+      pager.style.display = 'none';
+    }
+    const tableWrap = document.querySelector('.table-responsive');
+    if (tableWrap) {
+      const msg = document.createElement('div');
+      msg.className = 'alert alert-light text-center';
+      msg.textContent = 'History view cleared on this page only. Database records are unchanged.';
+      tableWrap.replaceWith(msg);
+    }
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    const btn = document.getElementById('clearHistoryViewBtn');
+    if (btn) {
+      btn.addEventListener('click', clearHistoryViewOnly);
+    }
+  });
 </script>
 
 {% endblock %}
