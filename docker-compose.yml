@@ -23,8 +23,6 @@ services:
     restart: unless-stopped
     depends_on:
       - db
-    env_file:
-      - .env
     environment:
       DATABASE_URL: postgresql://smartdoc:smartdoc@db:5432/smartdoc
       UPLOAD_FOLDER: /var/lib/smartdoc/uploads

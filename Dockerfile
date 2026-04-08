@@ -16,6 +16,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r /app/requirements.txt
 
 COPY . /app
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Default runtime paths; can be overridden via env
 ENV UPLOAD_FOLDER=/var/lib/smartdoc/uploads \
@@ -25,4 +27,5 @@ RUN mkdir -p /var/lib/smartdoc/uploads
 
 EXPOSE 5000
 
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["python", "app.py"]
